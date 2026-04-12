@@ -9,19 +9,20 @@ import {
   supabase,
   supabaseConfigStatus
 } from "@/lib/supabase";
+import { useAuthStore } from "@/store/authStore";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 
 function getConfigErrorMessage() {
   switch (supabaseConfigStatus.code) {
     case "ENV_URL_MISSING":
-      return "[ENV_URL_MISSING] EXPO_PUBLIC_SUPABASE_URL が未設定です。";
+      return "[ENV_URL_MISSING] EXPO_PUBLIC_SUPABASE_URL is missing.";
     case "ENV_KEY_MISSING":
-      return "[ENV_KEY_MISSING] EXPO_PUBLIC_SUPABASE_ANON_KEY が未設定です。";
+      return "[ENV_KEY_MISSING] EXPO_PUBLIC_SUPABASE_ANON_KEY is missing.";
     case "ENV_KEY_PLACEHOLDER":
-      return "[ENV_KEY_PLACEHOLDER] .env のキーがプレースホルダのままです。";
+      return "[ENV_KEY_PLACEHOLDER] Replace the placeholder key in .env.";
     case "ENV_KEY_INVALID_FORMAT":
-      return "[ENV_KEY_INVALID_FORMAT] sb_publishable_ から始まるキーを設定してください。";
+      return "[ENV_KEY_INVALID_FORMAT] Use sb_publishable_... key.";
     default:
       return "";
   }
@@ -32,11 +33,12 @@ export function LoginScreen() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const { authError } = useAuthStore();
   const configErrorMessage = useMemo(() => getConfigErrorMessage(), []);
 
   const handleLogin = async () => {
     if (!supabase) {
-      setError(`${configErrorMessage} devサーバーを再起動してください。`);
+      setError(`${configErrorMessage} Restart dev server after .env update.`);
       return;
     }
 
@@ -68,7 +70,7 @@ export function LoginScreen() {
         <View style={styles.form}>
           {!isSupabaseConfigured ? (
             <ErrorBanner
-              message={`${configErrorMessage} 反映には "npm run dev" の再起動が必要です。`}
+              message={`${configErrorMessage} Restart required: npm run dev`}
             />
           ) : null}
           {!isSupabaseConfigured ? (
@@ -76,6 +78,7 @@ export function LoginScreen() {
               message={`diagnostic: code=${supabaseConfigStatus.code}, url=${supabaseConfigStatus.hasUrl ? "set" : "empty"}, key=${supabaseConfigStatus.keyPreview}`}
             />
           ) : null}
+          {authError ? <ErrorBanner message={`auth: ${authError}`} /> : null}
           <FormInput
             label="メールアドレス"
             value={email}
