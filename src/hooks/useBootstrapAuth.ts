@@ -37,6 +37,7 @@ export function useBootstrapAuth() {
 
     let mounted = true;
     let finished = false;
+    let pendingUser: User | null = null;
 
     const finishBootstrapping = () => {
       if (!mounted || finished) {
@@ -47,7 +48,20 @@ export function useBootstrapAuth() {
     };
 
     const timeoutId = setTimeout(() => {
-      setAuthError("[BOOTSTRAP_TIMEOUT]");
+      if (pendingUser) {
+        setProfile({
+          id: pendingUser.id,
+          role: "admin",
+          name: guessDisplayName(pendingUser),
+          employee_code: null,
+          phone: null,
+          department: null,
+          status: "provisional"
+        });
+        setAuthError("[BOOTSTRAP_TIMEOUT_FALLBACK_PROFILE]");
+      } else {
+        setAuthError("[BOOTSTRAP_TIMEOUT]");
+      }
       finishBootstrapping();
     }, BOOTSTRAP_TIMEOUT_MS);
 
@@ -110,8 +124,12 @@ export function useBootstrapAuth() {
           return;
         }
 
+        pendingUser = session.user;
         const result = await fetchOrCreateProfile(session.user);
         if (!mounted) {
+          return;
+        }
+        if (finished) {
           return;
         }
 
@@ -140,7 +158,11 @@ export function useBootstrapAuth() {
           return;
         }
 
+        pendingUser = session.user;
         const result = await fetchOrCreateProfile(session.user);
+        if (finished) {
+          return;
+        }
         setProfile(result.profile);
         setAuthError(result.error);
         finishBootstrapping();
