@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   Alert,
   FlatList,
@@ -25,6 +26,7 @@ import { spacing } from "@/theme/spacing";
 const PROFILE_COLUMNS =
   "id, role, name, employee_code, phone, department, status";
 const REQUEST_TIMEOUT_MS = 10000;
+const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
 
 type EmployeeForm = {
   name: string;
@@ -61,15 +63,6 @@ async function withTimeout<T>(
 }
 
 function formatAddEmployeeError(message: string) {
-  if (message.includes("already registered")) {
-    return "このメールアドレスはすでに登録済みです。";
-  }
-  if (message.includes("Password")) {
-    return "パスワード要件を満たしていません。8文字以上で入力してください。";
-  }
-  if (message.includes("signups not allowed")) {
-    return "現在このプロジェクトでは新規登録が無効です。SupabaseのAuth設定を確認してください。";
-  }
   if (message.includes("duplicate key")) {
     return "社員コードが重複しています。別の社員コードを入力してください。";
   }
@@ -90,21 +83,44 @@ function createUuidV4() {
   });
 }
 
-function createHiddenCredentialSeed(form: EmployeeForm) {
-  const base = (form.employeeCode || form.name || "employee")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-  return base || "employee";
+function isProfilesTableMissing(message: string) {
+  return (
+    message.includes("Could not find the table 'public.profiles'") ||
+    message.includes("relation \"public.profiles\" does not exist") ||
+    message.includes("public.profiles")
+  );
 }
 
-function createHiddenAuthPayload(form: EmployeeForm) {
-  const seed = createHiddenCredentialSeed(form);
-  const stamp = Date.now();
-  const email = `employee-${seed}-${stamp}@internal.local`;
-  const password = `Tmp#${seed}${stamp}Aa`;
-  return { email, password };
+function buildLocalEmployee(form: EmployeeForm): Profile {
+  return {
+    id: `local-employee-${createUuidV4()}`,
+    role: "employee",
+    name: form.name.trim(),
+    employee_code: form.employeeCode.trim() || null,
+    phone: form.phone.trim() || null,
+    department: form.department.trim() || null,
+    status: "active"
+  };
+}
+
+async function readLocalEmployees() {
+  const raw = await AsyncStorage.getItem(LOCAL_EMPLOYEES_KEY);
+  if (!raw) {
+    return [] as Profile[];
+  }
+  try {
+    const parsed = JSON.parse(raw) as Profile[];
+    if (!Array.isArray(parsed)) {
+      return [] as Profile[];
+    }
+    return parsed.filter((row) => row?.role === "employee");
+  } catch {
+    return [] as Profile[];
+  }
+}
+
+async function writeLocalEmployees(employees: Profile[]) {
+  await AsyncStorage.setItem(LOCAL_EMPLOYEES_KEY, JSON.stringify(employees));
 }
 
 export function EmployeesScreen() {
@@ -117,11 +133,17 @@ export function EmployeesScreen() {
   const [form, setForm] = useState<EmployeeForm>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
+  const [isLocalMode, setIsLocalMode] = useState(false);
 
   const loadEmployees = useCallback(async (refresh = false) => {
-    if (!supabase) {
-      setEmployees([]);
-      setError("Supabase設定を確認してください。");
+    if (!supabase || isLocalMode) {
+      const locals = await readLocalEmployees();
+      setEmployees(locals);
+      setError(
+        isLocalMode
+          ? "Supabaseのprofilesテーブルが未作成のため、ローカル保存モードで動作中です。"
+          : "Supabase未接続のため、ローカル保存モードで動作中です。"
+      );
       setIsTimedOut(false);
       setIsLoading(false);
       return;
@@ -150,6 +172,14 @@ export function EmployeesScreen() {
       );
 
       if (fetchError) {
+        if (isProfilesTableMissing(fetchError.message)) {
+          const locals = await readLocalEmployees();
+          setEmployees(locals);
+          setIsLocalMode(true);
+          setError("profilesテーブルが未作成のため、ローカル保存モードに切り替えました。");
+          setIsTimedOut(false);
+          return;
+        }
         setEmployees([]);
         setError(`従業員の取得に失敗しました: ${fetchError.message}`);
         setIsTimedOut(false);
@@ -166,6 +196,12 @@ export function EmployeesScreen() {
         setEmployees([]);
         setError(null);
         setIsTimedOut(true);
+      } else if (isProfilesTableMissing(message)) {
+        const locals = await readLocalEmployees();
+        setEmployees(locals);
+        setIsLocalMode(true);
+        setError("profilesテーブルが未作成のため、ローカル保存モードに切り替えました。");
+        setIsTimedOut(false);
       } else {
         setError(`従業員の取得に失敗しました: ${message}`);
         setIsTimedOut(false);
@@ -174,7 +210,7 @@ export function EmployeesScreen() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [isLocalMode]);
 
   useEffect(() => {
     void loadEmployees();
@@ -201,12 +237,6 @@ export function EmployeesScreen() {
   }, [isAdding]);
 
   const handleSubmitAdd = useCallback(async () => {
-    if (!supabase) {
-      setFormError("Supabase設定を確認してください。");
-      return;
-    }
-    const client = supabase;
-
     const name = form.name.trim();
 
     if (!name) {
@@ -218,6 +248,22 @@ export function EmployeesScreen() {
     setFormError(null);
 
     try {
+      if (!supabase || isLocalMode) {
+        const localEmployee = buildLocalEmployee(form);
+        const nextEmployees = [...employees, localEmployee].sort((a, b) =>
+          a.name.localeCompare(b.name)
+        );
+        await writeLocalEmployees(nextEmployees);
+        setEmployees(nextEmployees);
+        setIsLocalMode(true);
+        setError("ローカル保存モードで従業員を追加しました。");
+        setIsTimedOut(false);
+        setAddModalVisible(false);
+        setForm(EMPTY_FORM);
+        return;
+      }
+      const client = supabase;
+
       const createProfile = async (targetUserId: string) => {
         const requestPromise = client
           .from("profiles")
@@ -246,30 +292,19 @@ export function EmployeesScreen() {
       const optimisticUserId = createUuidV4();
       const firstTry = await createProfile(optimisticUserId);
 
-      if (firstTry.error && firstTry.error.message.includes("foreign key constraint")) {
-        const hiddenAuth = createHiddenAuthPayload(form);
-        const { data: signUpData, error: signUpError } = await withTimeout(
-          client.auth.signUp(hiddenAuth),
-          "SIGNUP_TIMEOUT"
+      if (firstTry.error && isProfilesTableMissing(firstTry.error.message)) {
+        const localEmployee = buildLocalEmployee(form);
+        const nextEmployees = [...employees, localEmployee].sort((a, b) =>
+          a.name.localeCompare(b.name)
         );
-
-        if (signUpError) {
-          setFormError(formatAddEmployeeError(signUpError.message));
-          return;
-        }
-
-        const createdUserId = signUpData.user?.id;
-        if (!createdUserId) {
-          setFormError("従業員ユーザーの作成に失敗しました。");
-          return;
-        }
-
-        const secondTry = await createProfile(createdUserId);
-        if (secondTry.error) {
-          setFormError(formatAddEmployeeError(secondTry.error.message));
-          return;
-        }
-        createdProfile = secondTry.data;
+        await writeLocalEmployees(nextEmployees);
+        setEmployees(nextEmployees);
+        setIsLocalMode(true);
+        setError("profilesテーブル未作成のため、ローカル保存モードへ切り替えて追加しました。");
+        setIsTimedOut(false);
+        setAddModalVisible(false);
+        setForm(EMPTY_FORM);
+        return;
       } else {
         if (firstTry.error) {
           setFormError(formatAddEmployeeError(firstTry.error.message));
@@ -298,14 +333,22 @@ export function EmployeesScreen() {
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "Unknown add employee error";
-      if (message.includes("SIGNUP_TIMEOUT")) {
-        setFormError(
-          "アカウント作成がタイムアウトしました。通信状態を確認して再試行してください。"
-        );
-      } else if (message.includes("PROFILE_UPSERT_TIMEOUT")) {
+      if (message.includes("PROFILE_UPSERT_TIMEOUT")) {
         setFormError(
           "プロフィール保存がタイムアウトしました。通信状態を確認して再試行してください。"
         );
+      } else if (isProfilesTableMissing(message)) {
+        const localEmployee = buildLocalEmployee(form);
+        const nextEmployees = [...employees, localEmployee].sort((a, b) =>
+          a.name.localeCompare(b.name)
+        );
+        await writeLocalEmployees(nextEmployees);
+        setEmployees(nextEmployees);
+        setIsLocalMode(true);
+        setError("profilesテーブル未作成のため、ローカル保存モードへ切り替えて追加しました。");
+        setIsTimedOut(false);
+        setAddModalVisible(false);
+        setForm(EMPTY_FORM);
       } else if (message.includes("REQUEST_TIMEOUT")) {
         setFormError("追加処理がタイムアウトしました。通信を確認して再試行してください。");
       } else {
@@ -314,10 +357,14 @@ export function EmployeesScreen() {
     } finally {
       setIsAdding(false);
     }
-  }, [form]);
+  }, [employees, form, isLocalMode]);
 
   const deleteEmployee = useCallback(async (employee: Profile) => {
-    if (!supabase) {
+    if (!supabase || isLocalMode || employee.id.startsWith("local-employee-")) {
+      const nextEmployees = employees.filter((item) => item.id !== employee.id);
+      await writeLocalEmployees(nextEmployees);
+      setEmployees(nextEmployees);
+      setError(isLocalMode ? "ローカル保存モードで削除しました。" : null);
       return;
     }
 
@@ -333,7 +380,7 @@ export function EmployeesScreen() {
 
     setEmployees((current) => current.filter((item) => item.id !== employee.id));
     setError(null);
-  }, []);
+  }, [employees, isLocalMode]);
 
   const handleEmployeePress = useCallback(
     (employee: Profile) => {
