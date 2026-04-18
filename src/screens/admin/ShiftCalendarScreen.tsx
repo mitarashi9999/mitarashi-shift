@@ -53,6 +53,7 @@ type ShiftRowPayload = {
 
 const sheetsWebhookUrl = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
 const sheetsWebhookToken = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_TOKEN || "").trim();
+const sheetsProxyUrl = (process.env.EXPO_PUBLIC_SHEETS_PROXY_URL || "/api/sheets-sync").trim();
 const LOCAL_SHIFTS_KEY = "shift_local_shifts_v1";
 const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
 
@@ -602,7 +603,8 @@ export function ShiftCalendarScreen() {
       setError("この日付のシフトが無いため、スプレッドシートへ反映できません。");
       return;
     }
-    if (!sheetsWebhookUrl) {
+    const useProxy = Platform.OS === "web";
+    if (!useProxy && !sheetsWebhookUrl) {
       setError("Google連携URLが未設定です。.env に EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_URL を設定してください。");
       return;
     }
@@ -621,7 +623,8 @@ export function ShiftCalendarScreen() {
 
     setIsSyncingSheets(true);
     try {
-      const response = await fetch(sheetsWebhookUrl, {
+      const endpoint = useProxy ? sheetsProxyUrl : sheetsWebhookUrl;
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -633,15 +636,33 @@ export function ShiftCalendarScreen() {
         })
       });
 
+      const bodyText = await response.text();
+      let bodyJson: unknown = null;
+      try {
+        bodyJson = bodyText ? JSON.parse(bodyText) : null;
+      } catch {
+        bodyJson = null;
+      }
+
       if (!response.ok) {
-        const bodyText = await response.text();
-        throw new Error(`${response.status} ${response.statusText} ${bodyText}`.trim());
+        if (bodyJson && typeof bodyJson === "object" && "hint" in bodyJson) {
+          throw new Error(
+            `${response.status} ${response.statusText} ${(bodyJson as { hint?: string }).hint ?? ""}`.trim()
+          );
+        }
+        throw new Error(
+          `${response.status} ${response.statusText} ${bodyText}`.trim()
+        );
       }
 
       setError(null);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "Unknown sync error";
-      setError(`スプレッドシート連携に失敗しました: ${message}`);
+      const extraHint =
+        Platform.OS === "web"
+          ? "（Vercelの環境変数 GOOGLE_SHEETS_WEBHOOK_URL / GOOGLE_SHEETS_WEBHOOK_TOKEN を確認してください）"
+          : "";
+      setError(`スプレッドシート連携に失敗しました: ${message}${extraHint}`);
     } finally {
       setIsSyncingSheets(false);
     }
