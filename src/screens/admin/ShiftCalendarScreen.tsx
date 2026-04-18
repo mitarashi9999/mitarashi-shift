@@ -1,16 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Platform, ScrollView, Share, StyleSheet, View } from "react-native";
+import {
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  View
+} from "react-native";
 import type { MarkedDates } from "react-native-calendars/src/types";
 import dayjs from "dayjs";
 import { CalendarView } from "@/components/CalendarView";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorBanner } from "@/components/ErrorBanner";
+import { FormInput } from "@/components/FormInput";
 import { Header } from "@/components/Header";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { ShiftCard } from "@/components/ShiftCard";
 import { supabase } from "@/lib/supabase";
-import { Shift } from "@/types/app";
+import { Profile, Shift } from "@/types/app";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 
@@ -44,6 +54,23 @@ type ShiftRowPayload = {
 const sheetsWebhookUrl = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
 const sheetsWebhookToken = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_TOKEN || "").trim();
 const LOCAL_SHIFTS_KEY = "shift_local_shifts_v1";
+const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
+
+type ShiftForm = {
+  employeeId: string;
+  startTime: string;
+  endTime: string;
+  shiftType: string;
+  note: string;
+};
+
+const EMPTY_SHIFT_FORM: ShiftForm = {
+  employeeId: "",
+  startTime: "09:00",
+  endTime: "18:00",
+  shiftType: "通常勤務",
+  note: ""
+};
 
 function isShiftsTableMissing(message: string) {
   return (
@@ -51,6 +78,37 @@ function isShiftsTableMissing(message: string) {
     message.includes("relation \"public.shifts\" does not exist") ||
     message.includes("public.shifts")
   );
+}
+
+function isShiftInsertDenied(message: string) {
+  return (
+    message.includes("row-level security") ||
+    message.includes("permission denied") ||
+    message.includes("not allowed") ||
+    message.includes("new row violates")
+  );
+}
+
+function createUuidV4() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    const value = char === "x" ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+function isValidTime(value: string) {
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+}
+
+function sortShifts(list: Shift[]) {
+  return [...list].sort((a, b) => {
+    const dateCompare = a.shift_date.localeCompare(b.shift_date);
+    if (dateCompare !== 0) {
+      return dateCompare;
+    }
+    return a.start_time.localeCompare(b.start_time);
+  });
 }
 
 function filterMonthShifts(shifts: Shift[], targetDate: string) {
@@ -117,13 +175,40 @@ async function shareCsvOnNative(csv: string, selectedDate: string) {
   });
 }
 
+async function writeLocalShifts(shifts: Shift[]) {
+  await AsyncStorage.setItem(LOCAL_SHIFTS_KEY, JSON.stringify(sortShifts(shifts)));
+}
+
+async function readLocalEmployees() {
+  const raw = await AsyncStorage.getItem(LOCAL_EMPLOYEES_KEY);
+  if (!raw) {
+    return [] as Pick<Profile, "id" | "name">[];
+  }
+  try {
+    const parsed = JSON.parse(raw) as Profile[];
+    if (!Array.isArray(parsed)) {
+      return [] as Pick<Profile, "id" | "name">[];
+    }
+    return parsed
+      .filter((row) => row?.role === "employee")
+      .map((row) => ({ id: row.id, name: row.name }));
+  } catch {
+    return [] as Pick<Profile, "id" | "name">[];
+  }
+}
+
 export function ShiftCalendarScreen() {
   const [selectedDate, setSelectedDate] = useState(dayjs().format("YYYY-MM-DD"));
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [isExporting, setIsExporting] = useState(false);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [isAddModalVisible, setAddModalVisible] = useState(false);
+  const [isSavingShift, setIsSavingShift] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLocalMode, setIsLocalMode] = useState(false);
+  const [employees, setEmployees] = useState<ProfileNameRow[]>([]);
+  const [shiftForm, setShiftForm] = useState<ShiftForm>(EMPTY_SHIFT_FORM);
   const monthShiftCacheRef = useRef<Record<string, Shift[]>>({});
   const profileNameCacheRef = useRef<Record<string, string>>({});
 
@@ -131,6 +216,53 @@ export function ShiftCalendarScreen() {
     () => dayjs(selectedDate).format("YYYY-MM"),
     [selectedDate]
   );
+
+  const loadEmployeeOptions = useCallback(async () => {
+    if (!supabase || isLocalMode) {
+      const localEmployees = await readLocalEmployees();
+      setEmployees(localEmployees);
+      localEmployees.forEach((row) => {
+        profileNameCacheRef.current[row.id] = row.name;
+      });
+      setShiftForm((current) =>
+        current.employeeId
+          ? current
+          : { ...current, employeeId: localEmployees[0]?.id ?? "" }
+      );
+      return;
+    }
+
+    const profileResult = await supabase
+      .from("profiles")
+      .select("id, name")
+      .eq("role", "employee")
+      .order("name", { ascending: true });
+
+    if (profileResult.error) {
+      if (profileResult.error.message.includes("public.profiles")) {
+        const localEmployees = await readLocalEmployees();
+        setEmployees(localEmployees);
+        localEmployees.forEach((row) => {
+          profileNameCacheRef.current[row.id] = row.name;
+        });
+        setShiftForm((current) =>
+          current.employeeId
+            ? current
+            : { ...current, employeeId: localEmployees[0]?.id ?? "" }
+        );
+      }
+      return;
+    }
+
+    const rows = (profileResult.data ?? []) as ProfileNameRow[];
+    setEmployees(rows);
+    rows.forEach((row) => {
+      profileNameCacheRef.current[row.id] = row.name;
+    });
+    setShiftForm((current) =>
+      current.employeeId ? current : { ...current, employeeId: rows[0]?.id ?? "" }
+    );
+  }, [isLocalMode]);
 
   const loadData = useCallback(async (targetDate: string) => {
     const monthKey = dayjs(targetDate).format("YYYY-MM");
@@ -205,6 +337,10 @@ export function ShiftCalendarScreen() {
     void loadData(selectedDate);
   }, [loadData, selectedMonth]);
 
+  useEffect(() => {
+    void loadEmployeeOptions();
+  }, [loadEmployeeOptions]);
+
   const markedDates = useMemo(() => {
     return shifts.reduce((acc, shift) => {
       acc[shift.shift_date] = { marked: true, dotColor: colors.primary };
@@ -233,10 +369,24 @@ export function ShiftCalendarScreen() {
         return;
       }
 
+      for (const id of missingEmployeeIds) {
+        const localName = employees.find((employee) => employee.id === id)?.name;
+        if (localName) {
+          profileNameCacheRef.current[id] = localName;
+        }
+      }
+
+      const stillMissing = missingEmployeeIds.filter(
+        (id) => !profileNameCacheRef.current[id]
+      );
+      if (!stillMissing.length || !supabase || isLocalMode) {
+        return;
+      }
+
       const profileResult = await supabase
         .from("profiles")
         .select("id, name")
-        .in("id", missingEmployeeIds);
+        .in("id", stillMissing);
 
       if (!profileResult.error) {
         for (const row of (profileResult.data ?? []) as ProfileNameRow[]) {
@@ -244,8 +394,182 @@ export function ShiftCalendarScreen() {
         }
       }
     },
-    []
+    [employees, isLocalMode]
   );
+
+  const openAddModal = useCallback(() => {
+    if (!employees.length) {
+      setError("先に従業員を追加してください。");
+      return;
+    }
+    setError(null);
+    setFormError(null);
+    setShiftForm((current) => ({
+      ...current,
+      employeeId: current.employeeId || employees[0].id
+    }));
+    setAddModalVisible(true);
+  }, [employees]);
+
+  const closeAddModal = useCallback(() => {
+    if (isSavingShift) {
+      return;
+    }
+    setAddModalVisible(false);
+  }, [isSavingShift]);
+
+  const updateShiftForm = useCallback((key: keyof ShiftForm, value: string) => {
+    setShiftForm((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  const applySavedShiftToState = useCallback(
+    (savedShift: Shift) => {
+      const monthKey = dayjs(savedShift.shift_date).format("YYYY-MM");
+      const currentMonthShifts = monthShiftCacheRef.current[monthKey] ?? shifts;
+      const nextMonthShifts = sortShifts([
+        ...currentMonthShifts
+          .filter((item) => item.id !== savedShift.id)
+          .filter((item) => !item.id.startsWith("sample-")),
+        savedShift
+      ]);
+      monthShiftCacheRef.current[monthKey] = nextMonthShifts;
+
+      if (monthKey === selectedMonth) {
+        setShifts(nextMonthShifts);
+      }
+    },
+    [selectedMonth, shifts]
+  );
+
+  const persistShiftLocally = useCallback(
+    async (shift: Shift) => {
+      const localShifts = await readLocalShifts();
+      const nextLocalShifts = sortShifts([
+        ...localShifts.filter((item) => item.id !== shift.id),
+        shift
+      ]);
+      await writeLocalShifts(nextLocalShifts);
+      applySavedShiftToState(shift);
+    },
+    [applySavedShiftToState]
+  );
+
+  const handleCreateShift = useCallback(async () => {
+    const employeeId = shiftForm.employeeId.trim() || employees[0]?.id || "";
+    const startTime = shiftForm.startTime.trim();
+    const endTime = shiftForm.endTime.trim();
+    const shiftType = shiftForm.shiftType.trim() || "通常勤務";
+    const note = shiftForm.note.trim();
+
+    if (!employeeId) {
+      setFormError("従業員を選択してください。");
+      return;
+    }
+    if (!isValidTime(startTime) || !isValidTime(endTime)) {
+      setFormError("開始・終了時刻は HH:mm 形式で入力してください（例: 09:00）。");
+      return;
+    }
+    if (startTime >= endTime) {
+      setFormError("終了時刻は開始時刻より後にしてください。");
+      return;
+    }
+
+    const hasOverlap = shifts.some(
+      (item) =>
+        item.employee_id === employeeId &&
+        item.shift_date === selectedDate &&
+        startTime < item.end_time &&
+        endTime > item.start_time
+    );
+    if (hasOverlap) {
+      setFormError("同じ従業員のシフト時間が重複しています。");
+      return;
+    }
+
+    const localShift: Shift = {
+      id: `local-shift-${createUuidV4()}`,
+      employee_id: employeeId,
+      shift_date: selectedDate,
+      start_time: startTime,
+      end_time: endTime,
+      shift_type: shiftType,
+      note: note || null
+    };
+
+    setIsSavingShift(true);
+    setFormError(null);
+
+    try {
+      if (!supabase || isLocalMode) {
+        await persistShiftLocally(localShift);
+        setIsLocalMode(true);
+        setAddModalVisible(false);
+        setShiftForm((current) => ({ ...EMPTY_SHIFT_FORM, employeeId: current.employeeId }));
+        return;
+      }
+
+      const { data, error: insertError } = await supabase
+        .from("shifts")
+        .insert({
+          employee_id: employeeId,
+          shift_date: selectedDate,
+          start_time: startTime,
+          end_time: endTime,
+          shift_type: shiftType,
+          note: note || null,
+          created_by: employeeId
+        })
+        .select("id, employee_id, shift_date, start_time, end_time, shift_type, note")
+        .single();
+
+      if (insertError) {
+        if (
+          isShiftsTableMissing(insertError.message) ||
+          isShiftInsertDenied(insertError.message)
+        ) {
+          await persistShiftLocally(localShift);
+          setIsLocalMode(true);
+          setAddModalVisible(false);
+          setShiftForm((current) => ({
+            ...EMPTY_SHIFT_FORM,
+            employeeId: current.employeeId
+          }));
+          return;
+        }
+        if (insertError.message.includes("Shift overlaps")) {
+          setFormError("同じ従業員のシフト時間が重複しています。");
+          return;
+        }
+        setFormError(`シフト作成に失敗しました: ${insertError.message}`);
+        return;
+      }
+
+      const savedShift = (data ?? null) as Shift | null;
+      if (!savedShift) {
+        setFormError("シフト作成に失敗しました。");
+        return;
+      }
+
+      applySavedShiftToState(savedShift);
+      setError(null);
+      setAddModalVisible(false);
+      setShiftForm((current) => ({ ...EMPTY_SHIFT_FORM, employeeId: current.employeeId }));
+    } catch (cause) {
+      const message =
+        cause instanceof Error ? cause.message : "Unknown shift create error";
+      setFormError(`シフト作成に失敗しました: ${message}`);
+    } finally {
+      setIsSavingShift(false);
+    }
+  }, [
+    applySavedShiftToState,
+    employees,
+    isLocalMode,
+    persistShiftLocally,
+    selectedDate,
+    shiftForm,
+    shifts
+  ]);
 
   const handleExportPress = useCallback(async () => {
     if (!dailyShifts.length) {
@@ -332,6 +656,11 @@ export function ShiftCalendarScreen() {
         onDayPress={setSelectedDate}
       />
       <PrimaryButton
+        label="この日にシフトを追加"
+        onPress={openAddModal}
+        disabled={isExporting || isSyncingSheets}
+      />
+      <PrimaryButton
         label={isExporting ? "出力中..." : "Excelに反映（CSV出力）"}
         onPress={() => void handleExportPress()}
         disabled={isExporting || isSyncingSheets}
@@ -352,6 +681,89 @@ export function ShiftCalendarScreen() {
           />
         )}
       </View>
+
+      <Modal
+        visible={isAddModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={closeAddModal}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <ScrollView contentContainerStyle={styles.modalContent}>
+              <Text style={styles.modalTitle}>シフトを追加</Text>
+              <Text style={styles.modalHint}>
+                {selectedDate} のシフトを登録します。
+              </Text>
+              {formError ? <ErrorBanner message={formError} /> : null}
+
+              <View style={styles.employeeSection}>
+                <Text style={styles.employeeTitle}>従業員を選択</Text>
+                <View style={styles.employeeChipWrap}>
+                  {employees.map((employee) => {
+                    const selected = shiftForm.employeeId === employee.id;
+                    return (
+                      <Pressable
+                        key={employee.id}
+                        onPress={() => updateShiftForm("employeeId", employee.id)}
+                        style={[styles.employeeChip, selected && styles.employeeChipSelected]}
+                      >
+                        <Text
+                          style={[
+                            styles.employeeChipText,
+                            selected && styles.employeeChipTextSelected
+                          ]}
+                        >
+                          {employee.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+
+              <FormInput
+                label="開始時刻 (HH:mm)"
+                value={shiftForm.startTime}
+                onChangeText={(value) => updateShiftForm("startTime", value)}
+                placeholder="例: 09:00"
+              />
+              <FormInput
+                label="終了時刻 (HH:mm)"
+                value={shiftForm.endTime}
+                onChangeText={(value) => updateShiftForm("endTime", value)}
+                placeholder="例: 18:00"
+              />
+              <FormInput
+                label="勤務区分"
+                value={shiftForm.shiftType}
+                onChangeText={(value) => updateShiftForm("shiftType", value)}
+                placeholder="例: 通常勤務"
+              />
+              <FormInput
+                label="備考"
+                value={shiftForm.note}
+                onChangeText={(value) => updateShiftForm("note", value)}
+                placeholder="任意"
+              />
+
+              <View style={styles.modalActions}>
+                <PrimaryButton
+                  label="キャンセル"
+                  onPress={closeAddModal}
+                  variant="secondary"
+                  disabled={isSavingShift}
+                />
+                <PrimaryButton
+                  label={isSavingShift ? "保存中..." : "シフトを保存"}
+                  onPress={() => void handleCreateShift()}
+                  disabled={isSavingShift}
+                />
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -364,5 +776,68 @@ const styles = StyleSheet.create({
   },
   shiftList: {
     gap: spacing.md
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "flex-end"
+  },
+  modalCard: {
+    backgroundColor: colors.background,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: "90%"
+  },
+  modalContent: {
+    padding: spacing.xl,
+    gap: spacing.md,
+    paddingBottom: spacing.xxl
+  },
+  modalTitle: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: colors.text
+  },
+  modalHint: {
+    color: colors.subtext,
+    fontSize: 13,
+    lineHeight: 20
+  },
+  employeeSection: {
+    gap: spacing.sm
+  },
+  employeeTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  employeeChipWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm
+  },
+  employeeChip: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: 999
+  },
+  employeeChipSelected: {
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.primary
+  },
+  employeeChipText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "600"
+  },
+  employeeChipTextSelected: {
+    color: colors.primary
+  },
+  modalActions: {
+    gap: spacing.sm,
+    marginTop: spacing.sm
   }
 });
