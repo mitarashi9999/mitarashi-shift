@@ -75,6 +75,13 @@ EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_URL=<ウェブアプリURL>
 EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_TOKEN=<WEBHOOK_TOKENと同じ値>
 ```
 
+Vercel本番では、`Project Settings > Environment Variables` にも設定してください。
+- `GOOGLE_SHEETS_WEBHOOK_URL`（推奨）
+- `GOOGLE_SHEETS_WEBHOOK_TOKEN`（推奨）
+
+`URL` は必ず `https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec` 形式を使います。
+`/dev` や `docs.google.com` のURLは使えません。
+
 ## 5. アプリから反映
 1. 管理者でログイン
 2. `シフト` タブで日付を選択

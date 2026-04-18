@@ -645,13 +645,30 @@ export function ShiftCalendarScreen() {
       }
 
       if (!response.ok) {
-        if (bodyJson && typeof bodyJson === "object" && "hint" in bodyJson) {
-          throw new Error(
-            `${response.status} ${response.statusText} ${(bodyJson as { hint?: string }).hint ?? ""}`.trim()
-          );
+        if (bodyJson && typeof bodyJson === "object") {
+          const hint =
+            "hint" in bodyJson && typeof bodyJson.hint === "string"
+              ? bodyJson.hint
+              : "";
+          const preview =
+            "preview" in bodyJson && typeof bodyJson.preview === "string"
+              ? bodyJson.preview
+              : "";
+          const status =
+            "status" in bodyJson && typeof bodyJson.status === "number"
+              ? bodyJson.status
+              : response.status;
+          const statusText =
+            "statusText" in bodyJson && typeof bodyJson.statusText === "string"
+              ? bodyJson.statusText
+              : response.statusText;
+          if (hint || preview) {
+            const details = [hint, preview].filter(Boolean).join(" / ");
+            throw new Error(`${status} ${statusText} ${details}`.trim());
+          }
         }
         throw new Error(
-          `${response.status} ${response.statusText} ${bodyText}`.trim()
+          `${response.status} ${response.statusText}`
         );
       }
 
