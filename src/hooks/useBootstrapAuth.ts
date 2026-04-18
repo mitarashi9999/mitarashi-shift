@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import type { User } from "@supabase/supabase-js";
+import { restoreLocalAdminSession } from "@/lib/localAdminAuth";
 import { supabase } from "@/lib/supabase";
 import { useAuthStore } from "@/store/authStore";
 
@@ -38,15 +39,6 @@ export function useBootstrapAuth() {
 
   useEffect(() => {
     const client = supabase;
-
-    if (!client) {
-      setSession(null);
-      setProfile(null);
-      setAuthError("[SUPABASE_NOT_CONFIGURED]");
-      setBootstrapping(false);
-      return;
-    }
-
     let mounted = true;
     let finished = false;
     let pendingUser: User | null = null;
@@ -58,6 +50,30 @@ export function useBootstrapAuth() {
       finished = true;
       setBootstrapping(false);
     };
+
+    const restoreLocalAdmin = async () => {
+      const local = await restoreLocalAdminSession();
+      if (!local || !mounted) {
+        return false;
+      }
+      setSession(local.session);
+      setProfile(local.profile);
+      setAuthError("[LOCAL_ADMIN_AUTH]");
+      return true;
+    };
+
+    if (!client) {
+      void (async () => {
+        const restored = await restoreLocalAdmin();
+        if (!restored) {
+          setSession(null);
+          setProfile(null);
+          setAuthError("[SUPABASE_NOT_CONFIGURED]");
+        }
+        finishBootstrapping();
+      })();
+      return;
+    }
 
     const timeoutId = setTimeout(() => {
       if (pendingUser) {
@@ -138,8 +154,11 @@ export function useBootstrapAuth() {
         setSession(session);
 
         if (!session?.user) {
-          setProfile(null);
-          setAuthError(null);
+          const restored = await restoreLocalAdmin();
+          if (!restored) {
+            setProfile(null);
+            setAuthError(null);
+          }
           return;
         }
 

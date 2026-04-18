@@ -25,6 +25,7 @@ import { spacing } from "@/theme/spacing";
 const PROFILE_COLUMNS =
   "id, role, name, employee_code, phone, department, status";
 const REQUEST_TIMEOUT_MS = 10000;
+const SESSION_TIMEOUT_MS = 8000;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type EmployeeForm = {
@@ -44,6 +45,26 @@ const EMPTY_FORM: EmployeeForm = {
   phone: "",
   department: ""
 };
+
+async function withTimeout<T>(
+  promise: PromiseLike<T>,
+  timeoutCode: string,
+  timeoutMs = REQUEST_TIMEOUT_MS
+) {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(timeoutCode)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
 
 function formatAddEmployeeError(message: string) {
   if (message.includes("already registered")) {
@@ -101,14 +122,10 @@ export function EmployeesScreen() {
           error: result.error ? { message: result.error.message } : null
         }));
 
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("REQUEST_TIMEOUT")), REQUEST_TIMEOUT_MS);
-      });
-
-      const { data, error: fetchError } = await Promise.race([
+      const { data, error: fetchError } = await withTimeout(
         requestPromise,
-        timeoutPromise
-      ]);
+        "REQUEST_TIMEOUT"
+      );
 
       if (fetchError) {
         setEmployees([]);
@@ -188,14 +205,22 @@ export function EmployeesScreen() {
     setFormError(null);
 
     try {
+      const sessionBeforeResponse = await withTimeout(
+        supabase.auth.getSession(),
+        "SESSION_FETCH_TIMEOUT",
+        SESSION_TIMEOUT_MS
+      );
       const {
         data: { session: sessionBefore }
-      } = await supabase.auth.getSession();
+      } = sessionBeforeResponse;
 
-      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email,
-        password
-      });
+      const { data: signUpData, error: signUpError } = await withTimeout(
+        supabase.auth.signUp({
+          email,
+          password
+        }),
+        "SIGNUP_TIMEOUT"
+      );
       if (signUpError) {
         setFormError(formatAddEmployeeError(signUpError.message));
         return;
@@ -228,14 +253,10 @@ export function EmployeesScreen() {
           error: result.error ? { message: result.error.message } : null
         }));
 
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("REQUEST_TIMEOUT")), REQUEST_TIMEOUT_MS);
-      });
-
-      const { data, error: insertError } = await Promise.race([
+      const { data, error: insertError } = await withTimeout(
         requestPromise,
-        timeoutPromise
-      ]);
+        "PROFILE_UPSERT_TIMEOUT"
+      );
 
       if (insertError) {
         setFormError(formatAddEmployeeError(insertError.message));
@@ -246,19 +267,17 @@ export function EmployeesScreen() {
         return;
       }
 
-      const {
-        data: { session: sessionAfter }
-      } = await supabase.auth.getSession();
-
-      if (
-        sessionBefore?.access_token &&
-        sessionBefore?.refresh_token &&
-        sessionAfter?.user.id !== sessionBefore.user.id
-      ) {
-        await supabase.auth.setSession({
-          access_token: sessionBefore.access_token,
-          refresh_token: sessionBefore.refresh_token
-        });
+      if (sessionBefore?.access_token && sessionBefore?.refresh_token) {
+        await withTimeout(
+          supabase.auth.setSession({
+            access_token: sessionBefore.access_token,
+            refresh_token: sessionBefore.refresh_token
+          }),
+          "SESSION_RESTORE_TIMEOUT",
+          SESSION_TIMEOUT_MS
+        );
+      } else {
+        await supabase.auth.signOut();
       }
 
       setEmployees((current) =>
@@ -273,7 +292,23 @@ export function EmployeesScreen() {
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "Unknown add employee error";
-      if (message.includes("REQUEST_TIMEOUT")) {
+      if (message.includes("SIGNUP_TIMEOUT")) {
+        setFormError(
+          "アカウント作成がタイムアウトしました。通信状態を確認して再試行してください。"
+        );
+      } else if (message.includes("PROFILE_UPSERT_TIMEOUT")) {
+        setFormError(
+          "プロフィール保存がタイムアウトしました。通信状態を確認して再試行してください。"
+        );
+      } else if (message.includes("SESSION_RESTORE_TIMEOUT")) {
+        setFormError(
+          "従業員は作成されましたが、管理者ログインの復元に失敗しました。再ログインしてください。"
+        );
+      } else if (message.includes("SESSION_FETCH_TIMEOUT")) {
+        setFormError(
+          "認証確認がタイムアウトしました。通信状態を確認して再試行してください。"
+        );
+      } else if (message.includes("REQUEST_TIMEOUT")) {
         setFormError("追加処理がタイムアウトしました。通信を確認して再試行してください。");
       } else {
         setFormError(formatAddEmployeeError(message));

@@ -5,6 +5,13 @@ import { FormInput } from "@/components/FormInput";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import {
+  createLocalAdminProfile,
+  createLocalAdminSession,
+  isLocalAdminConfigured,
+  persistLocalAdminSession,
+  validateLocalAdminCredentials
+} from "@/lib/localAdminAuth";
+import {
   isSupabaseConfigured,
   supabase,
   supabaseConfigStatus
@@ -33,10 +40,29 @@ export function LoginScreen() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const { authError } = useAuthStore();
+  const { authError, setSession, setProfile, setAuthError } = useAuthStore();
   const configErrorMessage = useMemo(() => getConfigErrorMessage(), []);
+  const allowLocalAdminLogin = isLocalAdminConfigured();
 
   const handleLogin = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (allowLocalAdminLogin) {
+      if (!validateLocalAdminCredentials(normalizedEmail, password)) {
+        setError("指定された管理者メールアドレスまたはパスワードが一致しません。");
+        return;
+      }
+
+      setLoading(true);
+      setError("");
+      await persistLocalAdminSession(normalizedEmail);
+      setSession(createLocalAdminSession(normalizedEmail));
+      setProfile(createLocalAdminProfile(normalizedEmail));
+      setAuthError("[LOCAL_ADMIN_AUTH]");
+      setLoading(false);
+      return;
+    }
+
     if (!supabase) {
       setError(`${configErrorMessage} Restart dev server after .env update.`);
       return;
@@ -46,7 +72,7 @@ export function LoginScreen() {
     setError("");
 
     const { error: signInError } = await supabase.auth.signInWithPassword({
-      email,
+      email: normalizedEmail,
       password
     });
 
@@ -96,7 +122,12 @@ export function LoginScreen() {
           <PrimaryButton
             label={loading ? "ログイン中..." : "ログイン"}
             onPress={handleLogin}
-            disabled={loading || !email || !password || !isSupabaseConfigured}
+            disabled={
+              loading ||
+              !email ||
+              !password ||
+              (!isSupabaseConfigured && !allowLocalAdminLogin)
+            }
           />
         </View>
       </View>
