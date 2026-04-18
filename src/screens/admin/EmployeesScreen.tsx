@@ -25,12 +25,8 @@ import { spacing } from "@/theme/spacing";
 const PROFILE_COLUMNS =
   "id, role, name, employee_code, phone, department, status";
 const REQUEST_TIMEOUT_MS = 10000;
-const SESSION_TIMEOUT_MS = 8000;
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type EmployeeForm = {
-  email: string;
-  password: string;
   name: string;
   employeeCode: string;
   phone: string;
@@ -38,8 +34,6 @@ type EmployeeForm = {
 };
 
 const EMPTY_FORM: EmployeeForm = {
-  email: "",
-  password: "",
   name: "",
   employeeCode: "",
   phone: "",
@@ -82,7 +76,35 @@ function formatAddEmployeeError(message: string) {
   if (message.includes("row-level security")) {
     return "権限エラーです。管理者アカウントでログインし直してください。";
   }
+  if (message.includes("foreign key constraint")) {
+    return "従業員追加に必要な関連データ作成に失敗しました。SupabaseのAuth設定を確認してください。";
+  }
   return `従業員追加に失敗しました: ${message}`;
+}
+
+function createUuidV4() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    const value = char === "x" ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+function createHiddenCredentialSeed(form: EmployeeForm) {
+  const base = (form.employeeCode || form.name || "employee")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+  return base || "employee";
+}
+
+function createHiddenAuthPayload(form: EmployeeForm) {
+  const seed = createHiddenCredentialSeed(form);
+  const stamp = Date.now();
+  const email = `employee-${seed}-${stamp}@internal.local`;
+  const password = `Tmp#${seed}${stamp}Aa`;
+  return { email, password };
 }
 
 export function EmployeesScreen() {
@@ -183,19 +205,10 @@ export function EmployeesScreen() {
       setFormError("Supabase設定を確認してください。");
       return;
     }
+    const client = supabase;
 
-    const email = form.email.trim().toLowerCase();
-    const password = form.password.trim();
     const name = form.name.trim();
 
-    if (!EMAIL_REGEX.test(email)) {
-      setFormError("メールアドレスの形式が正しくありません。");
-      return;
-    }
-    if (password.length < 8) {
-      setFormError("初期パスワードは8文字以上で入力してください。");
-      return;
-    }
     if (!name) {
       setFormError("氏名は必須です。");
       return;
@@ -205,83 +218,76 @@ export function EmployeesScreen() {
     setFormError(null);
 
     try {
-      const sessionBeforeResponse = await withTimeout(
-        supabase.auth.getSession(),
-        "SESSION_FETCH_TIMEOUT",
-        SESSION_TIMEOUT_MS
-      );
-      const {
-        data: { session: sessionBefore }
-      } = sessionBeforeResponse;
+      const createProfile = async (targetUserId: string) => {
+        const requestPromise = client
+          .from("profiles")
+          .upsert(
+            {
+              id: targetUserId,
+              role: "employee",
+              name,
+              employee_code: form.employeeCode.trim() || null,
+              phone: form.phone.trim() || null,
+              department: form.department.trim() || null,
+              status: "active"
+            },
+            { onConflict: "id" }
+          )
+          .select(PROFILE_COLUMNS)
+          .single()
+          .then((result) => ({
+            data: (result.data ?? null) as Profile | null,
+            error: result.error ? { message: result.error.message } : null
+          }));
+        return withTimeout(requestPromise, "PROFILE_UPSERT_TIMEOUT");
+      };
 
-      const { data: signUpData, error: signUpError } = await withTimeout(
-        supabase.auth.signUp({
-          email,
-          password
-        }),
-        "SIGNUP_TIMEOUT"
-      );
-      if (signUpError) {
-        setFormError(formatAddEmployeeError(signUpError.message));
-        return;
+      let createdProfile: Profile | null = null;
+      const optimisticUserId = createUuidV4();
+      const firstTry = await createProfile(optimisticUserId);
+
+      if (firstTry.error && firstTry.error.message.includes("foreign key constraint")) {
+        const hiddenAuth = createHiddenAuthPayload(form);
+        const { data: signUpData, error: signUpError } = await withTimeout(
+          client.auth.signUp(hiddenAuth),
+          "SIGNUP_TIMEOUT"
+        );
+
+        if (signUpError) {
+          setFormError(formatAddEmployeeError(signUpError.message));
+          return;
+        }
+
+        const createdUserId = signUpData.user?.id;
+        if (!createdUserId) {
+          setFormError("従業員ユーザーの作成に失敗しました。");
+          return;
+        }
+
+        const secondTry = await createProfile(createdUserId);
+        if (secondTry.error) {
+          setFormError(formatAddEmployeeError(secondTry.error.message));
+          return;
+        }
+        createdProfile = secondTry.data;
+      } else {
+        if (firstTry.error) {
+          setFormError(formatAddEmployeeError(firstTry.error.message));
+          return;
+        }
+        createdProfile = firstTry.data;
       }
 
-      const createdUserId = signUpData.user?.id;
-      if (!createdUserId) {
-        setFormError("従業員ユーザーの作成に失敗しました。");
-        return;
-      }
-
-      const requestPromise = supabase
-        .from("profiles")
-        .upsert(
-          {
-            id: createdUserId,
-            role: "employee",
-            name,
-            employee_code: form.employeeCode.trim() || null,
-            phone: form.phone.trim() || null,
-            department: form.department.trim() || null,
-            status: "active"
-          },
-          { onConflict: "id" }
-        )
-        .select(PROFILE_COLUMNS)
-        .single()
-        .then((result) => ({
-          data: (result.data ?? null) as Profile | null,
-          error: result.error ? { message: result.error.message } : null
-        }));
-
-      const { data, error: insertError } = await withTimeout(
-        requestPromise,
-        "PROFILE_UPSERT_TIMEOUT"
-      );
-
-      if (insertError) {
-        setFormError(formatAddEmployeeError(insertError.message));
-        return;
-      }
-      if (!data) {
+      if (!createdProfile) {
         setFormError("従業員の追加に失敗しました。");
         return;
       }
 
-      if (sessionBefore?.access_token && sessionBefore?.refresh_token) {
-        await withTimeout(
-          supabase.auth.setSession({
-            access_token: sessionBefore.access_token,
-            refresh_token: sessionBefore.refresh_token
-          }),
-          "SESSION_RESTORE_TIMEOUT",
-          SESSION_TIMEOUT_MS
-        );
-      } else {
-        await supabase.auth.signOut();
-      }
-
       setEmployees((current) =>
-        [...current.filter((item) => item.id !== data.id), data].sort((a, b) =>
+        [
+          ...current.filter((item) => item.id !== createdProfile.id),
+          createdProfile
+        ].sort((a, b) =>
           a.name.localeCompare(b.name)
         )
       );
@@ -299,14 +305,6 @@ export function EmployeesScreen() {
       } else if (message.includes("PROFILE_UPSERT_TIMEOUT")) {
         setFormError(
           "プロフィール保存がタイムアウトしました。通信状態を確認して再試行してください。"
-        );
-      } else if (message.includes("SESSION_RESTORE_TIMEOUT")) {
-        setFormError(
-          "従業員は作成されましたが、管理者ログインの復元に失敗しました。再ログインしてください。"
-        );
-      } else if (message.includes("SESSION_FETCH_TIMEOUT")) {
-        setFormError(
-          "認証確認がタイムアウトしました。通信状態を確認して再試行してください。"
         );
       } else if (message.includes("REQUEST_TIMEOUT")) {
         setFormError("追加処理がタイムアウトしました。通信を確認して再試行してください。");
@@ -412,23 +410,10 @@ export function EmployeesScreen() {
             <ScrollView contentContainerStyle={styles.modalContent}>
               <Text style={styles.modalTitle}>従業員を追加</Text>
               <Text style={styles.modalHint}>
-                従業員ログイン用のメールアドレスと初期パスワードを設定してください。
+                氏名などの基本情報を入力して従業員を追加してください。
               </Text>
               {formError ? <ErrorBanner message={formError} /> : null}
 
-              <FormInput
-                label="ログインメール (必須)"
-                value={form.email}
-                onChangeText={(value) => handleChangeForm("email", value)}
-                placeholder="例: employee01@example.com"
-              />
-              <FormInput
-                label="初期パスワード (必須)"
-                value={form.password}
-                onChangeText={(value) => handleChangeForm("password", value)}
-                placeholder="8文字以上"
-                secureTextEntry
-              />
               <FormInput
                 label="氏名 (必須)"
                 value={form.name}

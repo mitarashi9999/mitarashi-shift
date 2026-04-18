@@ -2,10 +2,7 @@ import React from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { Ionicons } from "@expo/vector-icons";
-import { LoginScreen } from "@/screens/auth/LoginScreen";
-import { SplashScreen } from "@/screens/common/SplashScreen";
 import { SettingsScreen } from "@/screens/common/SettingsScreen";
-import { ProfileMissingScreen } from "@/screens/common/ProfileMissingScreen";
 import { AdminHomeScreen } from "@/screens/admin/AdminHomeScreen";
 import { EmployeesScreen } from "@/screens/admin/EmployeesScreen";
 import { ShiftCalendarScreen } from "@/screens/admin/ShiftCalendarScreen";
@@ -14,8 +11,6 @@ import { EmployeeHomeScreen } from "@/screens/employee/EmployeeHomeScreen";
 import { MyShiftScreen } from "@/screens/employee/MyShiftScreen";
 import { EmployeeChatScreen } from "@/screens/employee/EmployeeChatScreen";
 import { AnnouncementsScreen } from "@/screens/employee/AnnouncementsScreen";
-import { useBootstrapAuth } from "@/hooks/useBootstrapAuth";
-import { useAuthStore } from "@/store/authStore";
 import { colors } from "@/theme/colors";
 
 const Tab = createBottomTabNavigator();
@@ -105,32 +100,9 @@ function EmployeeTabs() {
 }
 
 export function AppNavigator() {
-  useBootstrapAuth();
-  const { isBootstrapping, session, profile, authError } = useAuthStore();
-
-  if (isBootstrapping) {
-    return <SplashScreen />;
-  }
-
-  if (!session) {
-    return (
-      <NavigationContainer>
-        <LoginScreen />
-      </NavigationContainer>
-    );
-  }
-
-  if (!profile) {
-    return (
-      <NavigationContainer>
-        <ProfileMissingScreen userId={session.user.id} errorCode={authError} />
-      </NavigationContainer>
-    );
-  }
-
   return (
     <NavigationContainer>
-      {profile.role === "admin" ? <AdminTabs /> : <EmployeeTabs />}
+      <AdminTabs />
     </NavigationContainer>
   );
 }
