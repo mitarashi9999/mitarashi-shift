@@ -7,6 +7,18 @@ const BOOTSTRAP_TIMEOUT_MS = 12000;
 const PROFILE_COLUMNS =
   "id, role, name, employee_code, phone, department, status";
 
+function buildProvisionalAdminProfile(user: User) {
+  return {
+    id: user.id,
+    role: "admin" as const,
+    name: guessDisplayName(user),
+    employee_code: null,
+    phone: null,
+    department: null,
+    status: "provisional"
+  };
+}
+
 function guessDisplayName(user: User) {
   const metadataName = typeof user.user_metadata?.name === "string"
     ? user.user_metadata.name.trim()
@@ -81,21 +93,28 @@ export function useBootstrapAuth() {
 
       const { data: inserted, error: insertError } = await client
         .from("profiles")
-        .insert({
+        .upsert({
           id: user.id,
+          role: "admin",
           name: guessDisplayName(user),
           status: "active"
-        })
+        }, { onConflict: "id" })
         .select(PROFILE_COLUMNS)
         .maybeSingle();
 
       if (insertError) {
-        return { profile: null, error: `[PROFILE_CREATE_ERROR] ${insertError.code ?? insertError.message}` };
+        return {
+          profile: buildProvisionalAdminProfile(user),
+          error: `[PROFILE_CREATE_FALLBACK_ADMIN] ${insertError.code ?? insertError.message}`
+        };
       }
       if (inserted) {
         return { profile: inserted, error: null };
       }
-      return { profile: null, error: "[PROFILE_NOT_FOUND]" };
+      return {
+        profile: buildProvisionalAdminProfile(user),
+        error: "[PROFILE_NOT_FOUND_FALLBACK_ADMIN]"
+      };
     };
 
     const load = async () => {
