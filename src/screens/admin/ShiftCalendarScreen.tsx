@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform, ScrollView, Share, StyleSheet, View } from "react-native";
 import type { MarkedDates } from "react-native-calendars/src/types";
 import dayjs from "dayjs";
@@ -42,6 +43,36 @@ type ShiftRowPayload = {
 
 const sheetsWebhookUrl = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
 const sheetsWebhookToken = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_TOKEN || "").trim();
+const LOCAL_SHIFTS_KEY = "shift_local_shifts_v1";
+
+function isShiftsTableMissing(message: string) {
+  return (
+    message.includes("Could not find the table 'public.shifts'") ||
+    message.includes("relation \"public.shifts\" does not exist") ||
+    message.includes("public.shifts")
+  );
+}
+
+function filterMonthShifts(shifts: Shift[], targetDate: string) {
+  const monthKey = dayjs(targetDate).format("YYYY-MM");
+  return shifts.filter((shift) => shift.shift_date.startsWith(monthKey));
+}
+
+async function readLocalShifts() {
+  const raw = await AsyncStorage.getItem(LOCAL_SHIFTS_KEY);
+  if (!raw) {
+    return [] as Shift[];
+  }
+  try {
+    const parsed = JSON.parse(raw) as Shift[];
+    if (!Array.isArray(parsed)) {
+      return [] as Shift[];
+    }
+    return parsed;
+  } catch {
+    return [] as Shift[];
+  }
+}
 
 function escapeCsv(value: string) {
   if (value.includes(",") || value.includes("\"") || value.includes("\n")) {
@@ -92,6 +123,7 @@ export function ShiftCalendarScreen() {
   const [isExporting, setIsExporting] = useState(false);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isLocalMode, setIsLocalMode] = useState(false);
   const monthShiftCacheRef = useRef<Record<string, Shift[]>>({});
   const profileNameCacheRef = useRef<Record<string, string>>({});
 
@@ -109,8 +141,10 @@ export function ShiftCalendarScreen() {
       return;
     }
 
-    if (!supabase) {
-      setShifts(MOCK_SHIFTS);
+    if (!supabase || isLocalMode) {
+      const localShifts = await readLocalShifts();
+      const monthLocalShifts = filterMonthShifts(localShifts, targetDate);
+      setShifts(monthLocalShifts.length ? monthLocalShifts : MOCK_SHIFTS);
       setError(null);
       return;
     }
@@ -130,6 +164,17 @@ export function ShiftCalendarScreen() {
         .order("start_time", { ascending: true });
 
       if (shiftResult.error) {
+        if (isShiftsTableMissing(shiftResult.error.message)) {
+          const localShifts = await readLocalShifts();
+          const monthLocalShifts = filterMonthShifts(localShifts, targetDate);
+          monthShiftCacheRef.current[monthKey] = monthLocalShifts.length
+            ? monthLocalShifts
+            : MOCK_SHIFTS;
+          setShifts(monthShiftCacheRef.current[monthKey]);
+          setError(null);
+          setIsLocalMode(true);
+          return;
+        }
         setError(`シフト取得に失敗しました: ${shiftResult.error.message}`);
         setShifts([]);
         return;
@@ -140,10 +185,21 @@ export function ShiftCalendarScreen() {
       setShifts(monthShifts);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "Unknown load error";
+      if (isShiftsTableMissing(message)) {
+        const localShifts = await readLocalShifts();
+        const monthLocalShifts = filterMonthShifts(localShifts, targetDate);
+        monthShiftCacheRef.current[monthKey] = monthLocalShifts.length
+          ? monthLocalShifts
+          : MOCK_SHIFTS;
+        setShifts(monthShiftCacheRef.current[monthKey]);
+        setError(null);
+        setIsLocalMode(true);
+        return;
+      }
       setError(`シフト取得に失敗しました: ${message}`);
       setShifts([]);
     }
-  }, []);
+  }, [isLocalMode]);
 
   useEffect(() => {
     void loadData(selectedDate);
