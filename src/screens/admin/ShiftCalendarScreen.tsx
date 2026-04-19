@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
 import {
+  Alert,
   Modal,
   Platform,
   Pressable,
@@ -225,6 +226,7 @@ export function ShiftCalendarScreen() {
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [isAddModalVisible, setAddModalVisible] = useState(false);
   const [isSavingShift, setIsSavingShift] = useState(false);
+  const [isDeletingShiftId, setIsDeletingShiftId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLocalMode, setIsLocalMode] = useState(false);
@@ -504,6 +506,100 @@ export function ShiftCalendarScreen() {
     [applySavedShiftToState]
   );
 
+  const removeShiftFromState = useCallback(
+    (targetShift: Shift) => {
+      const monthKey = dayjs(targetShift.shift_date).format("YYYY-MM");
+      const currentMonthShifts = monthShiftCacheRef.current[monthKey] ?? shifts;
+      const nextMonthShifts = currentMonthShifts.filter(
+        (item) => item.id !== targetShift.id
+      );
+      monthShiftCacheRef.current[monthKey] = nextMonthShifts;
+
+      if (monthKey === selectedMonth) {
+        setShifts(nextMonthShifts);
+      }
+    },
+    [selectedMonth, shifts]
+  );
+
+  const removeShiftFromLocalCache = useCallback(async (targetShift: Shift) => {
+    const localShifts = await readLocalShifts();
+    const nextLocalShifts = localShifts.filter((item) => item.id !== targetShift.id);
+    await writeLocalShifts(nextLocalShifts);
+  }, []);
+
+  const performDeleteShift = useCallback(
+    async (targetShift: Shift) => {
+      if (targetShift.id.startsWith("sample-")) {
+        setError("サンプルシフトは削除できません。");
+        return;
+      }
+
+      setIsDeletingShiftId(targetShift.id);
+      setError(null);
+      try {
+        if (!supabase || isLocalMode || targetShift.id.startsWith("local-shift-")) {
+          await removeShiftFromLocalCache(targetShift);
+          removeShiftFromState(targetShift);
+          setIsLocalMode(true);
+          return;
+        }
+
+        const { error: deleteError } = await supabase
+          .from("shifts")
+          .delete()
+          .eq("id", targetShift.id);
+
+        if (deleteError) {
+          if (isShiftsTableMissing(deleteError.message)) {
+            await removeShiftFromLocalCache(targetShift);
+            removeShiftFromState(targetShift);
+            setIsLocalMode(true);
+            return;
+          }
+          setError(`シフト削除に失敗しました: ${deleteError.message}`);
+          return;
+        }
+
+        await removeShiftFromLocalCache(targetShift);
+        removeShiftFromState(targetShift);
+      } catch (cause) {
+        const message =
+          cause instanceof Error ? cause.message : "Unknown shift delete error";
+        setError(`シフト削除に失敗しました: ${message}`);
+      } finally {
+        setIsDeletingShiftId((current) =>
+          current === targetShift.id ? null : current
+        );
+      }
+    },
+    [isLocalMode, removeShiftFromLocalCache, removeShiftFromState]
+  );
+
+  const confirmDeleteShift = useCallback(
+    (targetShift: Shift) => {
+      if (Platform.OS === "web") {
+        const accepted = window.confirm(
+          `${targetShift.shift_date} ${targetShift.start_time}-${targetShift.end_time} のシフトを削除しますか？`
+        );
+        if (accepted) {
+          void performDeleteShift(targetShift);
+        }
+        return;
+      }
+
+      Alert.alert("シフトを削除", "このシフトを削除しますか？", [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "削除",
+          style: "destructive",
+          onPress: () => void performDeleteShift(targetShift)
+        }
+      ]);
+    },
+    [performDeleteShift]
+  );
+
   const handleCreateShift = useCallback(async () => {
     const employeeId = shiftForm.employeeId.trim() || employees[0]?.id || "";
     const startTime = shiftForm.startTime.trim();
@@ -763,12 +859,26 @@ export function ShiftCalendarScreen() {
       <View style={styles.shiftList}>
         {dailyShifts.length ? (
           dailyShifts.map((shift) => (
-            <ShiftCard
-              key={shift.id}
-              shift={shift}
-              showEmployee
-              employeeName={employeeNameMap[shift.employee_id]}
-            />
+            <View key={shift.id} style={styles.shiftItem}>
+              <ShiftCard
+                shift={shift}
+                showEmployee
+                employeeName={employeeNameMap[shift.employee_id]}
+              />
+              <Pressable
+                style={[
+                  styles.deleteButton,
+                  (isDeletingShiftId === shift.id || shift.id.startsWith("sample-")) &&
+                    styles.deleteButtonDisabled
+                ]}
+                onPress={() => confirmDeleteShift(shift)}
+                disabled={isDeletingShiftId === shift.id || shift.id.startsWith("sample-")}
+              >
+                <Text style={styles.deleteButtonText}>
+                  {isDeletingShiftId === shift.id ? "削除中..." : "このシフトを削除"}
+                </Text>
+              </Pressable>
+            </View>
           ))
         ) : (
           <EmptyState
@@ -890,6 +1000,23 @@ const styles = StyleSheet.create({
   },
   shiftList: {
     gap: spacing.md
+  },
+  shiftItem: {
+    gap: spacing.sm
+  },
+  deleteButton: {
+    backgroundColor: "#FCE9E7",
+    borderRadius: 12,
+    paddingVertical: spacing.sm,
+    alignItems: "center"
+  },
+  deleteButtonDisabled: {
+    opacity: 0.6
+  },
+  deleteButtonText: {
+    color: "#B42318",
+    fontWeight: "700",
+    fontSize: 14
   },
   modalOverlay: {
     flex: 1,
