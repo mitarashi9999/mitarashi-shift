@@ -366,6 +366,14 @@ export function ShiftCalendarScreen() {
     return shifts.filter((shift) => shift.shift_date === selectedDate);
   }, [selectedDate, shifts]);
 
+  const employeeNameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    employees.forEach((employee) => {
+      map[employee.id] = employee.name;
+    });
+    return map;
+  }, [employees]);
+
   const ensureEmployeeNames = useCallback(
     async (targetShifts: Shift[]) => {
       if (!supabase) {
@@ -745,7 +753,14 @@ export function ShiftCalendarScreen() {
       {error ? <ErrorBanner message={error} /> : null}
       <View style={styles.shiftList}>
         {dailyShifts.length ? (
-          dailyShifts.map((shift) => <ShiftCard key={shift.id} shift={shift} />)
+          dailyShifts.map((shift) => (
+            <ShiftCard
+              key={shift.id}
+              shift={shift}
+              showEmployee
+              employeeName={employeeNameMap[shift.employee_id]}
+            />
+          ))
         ) : (
           <EmptyState
             title="この日のシフトはありません"
