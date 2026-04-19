@@ -57,6 +57,7 @@ const sheetsWebhookToken = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_TOKEN 
 const sheetsProxyUrl = (process.env.EXPO_PUBLIC_SHEETS_PROXY_URL || "/api/sheets-sync").trim();
 const LOCAL_SHIFTS_KEY = "shift_local_shifts_v1";
 const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
+const SHIFT_TYPE_OPTIONS = ["バッテリー交換", "シェア配送"] as const;
 
 type ShiftForm = {
   employeeId: string;
@@ -70,7 +71,7 @@ const EMPTY_SHIFT_FORM: ShiftForm = {
   employeeId: "",
   startTime: "09:00",
   endTime: "18:00",
-  shiftType: "通常勤務",
+  shiftType: SHIFT_TYPE_OPTIONS[0],
   note: ""
 };
 
@@ -428,7 +429,10 @@ export function ShiftCalendarScreen() {
     setFormError(null);
     setShiftForm((current) => ({
       ...current,
-      employeeId: current.employeeId || employees[0].id
+      employeeId: current.employeeId || employees[0].id,
+      shiftType: SHIFT_TYPE_OPTIONS.includes(current.shiftType as typeof SHIFT_TYPE_OPTIONS[number])
+        ? current.shiftType
+        : SHIFT_TYPE_OPTIONS[0]
     }));
     setAddModalVisible(true);
   }, [employees]);
@@ -449,7 +453,10 @@ export function ShiftCalendarScreen() {
     setFormError(null);
     setShiftForm((current) => ({
       ...current,
-      employeeId: current.employeeId || latestEmployees[0].id
+      employeeId: current.employeeId || latestEmployees[0].id,
+      shiftType: SHIFT_TYPE_OPTIONS.includes(current.shiftType as typeof SHIFT_TYPE_OPTIONS[number])
+        ? current.shiftType
+        : SHIFT_TYPE_OPTIONS[0]
     }));
     setAddModalVisible(true);
   }, [employees, loadEmployeeOptions, openAddModal]);
@@ -501,7 +508,9 @@ export function ShiftCalendarScreen() {
     const employeeId = shiftForm.employeeId.trim() || employees[0]?.id || "";
     const startTime = shiftForm.startTime.trim();
     const endTime = shiftForm.endTime.trim();
-    const shiftType = shiftForm.shiftType.trim() || "通常勤務";
+    const shiftType =
+      SHIFT_TYPE_OPTIONS.find((option) => option === shiftForm.shiftType) ??
+      SHIFT_TYPE_OPTIONS[0];
     const note = shiftForm.note.trim();
 
     if (!employeeId) {
@@ -821,12 +830,30 @@ export function ShiftCalendarScreen() {
                 onChangeText={(value) => updateShiftForm("endTime", value)}
                 placeholder="例: 18:00"
               />
-              <FormInput
-                label="勤務区分"
-                value={shiftForm.shiftType}
-                onChangeText={(value) => updateShiftForm("shiftType", value)}
-                placeholder="例: 通常勤務"
-              />
+              <View style={styles.employeeSection}>
+                <Text style={styles.employeeTitle}>勤務区分</Text>
+                <View style={styles.employeeChipWrap}>
+                  {SHIFT_TYPE_OPTIONS.map((option) => {
+                    const selected = shiftForm.shiftType === option;
+                    return (
+                      <Pressable
+                        key={option}
+                        onPress={() => updateShiftForm("shiftType", option)}
+                        style={[styles.employeeChip, selected && styles.employeeChipSelected]}
+                      >
+                        <Text
+                          style={[
+                            styles.employeeChipText,
+                            selected && styles.employeeChipTextSelected
+                          ]}
+                        >
+                          {option}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
               <FormInput
                 label="備考"
                 value={shiftForm.note}
