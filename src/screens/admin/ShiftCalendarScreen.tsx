@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect } from "@react-navigation/native";
 import {
   Modal,
   Platform,
@@ -191,11 +192,29 @@ async function readLocalEmployees() {
       return [] as Pick<Profile, "id" | "name">[];
     }
     return parsed
-      .filter((row) => row?.role === "employee")
+      .filter((row) => row && (row.role === "employee" || !row.role))
       .map((row) => ({ id: row.id, name: row.name }));
   } catch {
     return [] as Pick<Profile, "id" | "name">[];
   }
+}
+
+function mergeEmployeeRows(
+  localEmployees: ProfileNameRow[],
+  remoteEmployees: ProfileNameRow[]
+) {
+  const map = new Map<string, ProfileNameRow>();
+  localEmployees.forEach((row) => {
+    if (row?.id) {
+      map.set(row.id, { id: row.id, name: row.name ?? "" });
+    }
+  });
+  remoteEmployees.forEach((row) => {
+    if (row?.id) {
+      map.set(row.id, { id: row.id, name: row.name ?? "" });
+    }
+  });
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, "ja"));
 }
 
 export function ShiftCalendarScreen() {
@@ -218,19 +237,21 @@ export function ShiftCalendarScreen() {
     [selectedDate]
   );
 
-  const loadEmployeeOptions = useCallback(async () => {
-    if (!supabase || isLocalMode) {
-      const localEmployees = await readLocalEmployees();
-      setEmployees(localEmployees);
-      localEmployees.forEach((row) => {
+  const loadEmployeeOptions = useCallback(async (): Promise<ProfileNameRow[]> => {
+    const applyRows = (rows: ProfileNameRow[]) => {
+      setEmployees(rows);
+      rows.forEach((row) => {
         profileNameCacheRef.current[row.id] = row.name;
       });
       setShiftForm((current) =>
-        current.employeeId
-          ? current
-          : { ...current, employeeId: localEmployees[0]?.id ?? "" }
+        current.employeeId ? current : { ...current, employeeId: rows[0]?.id ?? "" }
       );
-      return;
+      return rows;
+    };
+
+    const localEmployees = await readLocalEmployees();
+    if (!supabase || isLocalMode) {
+      return applyRows(localEmployees);
     }
 
     const profileResult = await supabase
@@ -241,28 +262,14 @@ export function ShiftCalendarScreen() {
 
     if (profileResult.error) {
       if (profileResult.error.message.includes("public.profiles")) {
-        const localEmployees = await readLocalEmployees();
-        setEmployees(localEmployees);
-        localEmployees.forEach((row) => {
-          profileNameCacheRef.current[row.id] = row.name;
-        });
-        setShiftForm((current) =>
-          current.employeeId
-            ? current
-            : { ...current, employeeId: localEmployees[0]?.id ?? "" }
-        );
+        setIsLocalMode(true);
       }
-      return;
+      return applyRows(localEmployees);
     }
 
-    const rows = (profileResult.data ?? []) as ProfileNameRow[];
-    setEmployees(rows);
-    rows.forEach((row) => {
-      profileNameCacheRef.current[row.id] = row.name;
-    });
-    setShiftForm((current) =>
-      current.employeeId ? current : { ...current, employeeId: rows[0]?.id ?? "" }
-    );
+    const remoteRows = (profileResult.data ?? []) as ProfileNameRow[];
+    const mergedRows = mergeEmployeeRows(localEmployees, remoteRows);
+    return applyRows(mergedRows);
   }, [isLocalMode]);
 
   const loadData = useCallback(async (targetDate: string) => {
@@ -342,6 +349,12 @@ export function ShiftCalendarScreen() {
     void loadEmployeeOptions();
   }, [loadEmployeeOptions]);
 
+  useFocusEffect(
+    useCallback(() => {
+      void loadEmployeeOptions();
+    }, [loadEmployeeOptions])
+  );
+
   const markedDates = useMemo(() => {
     return shifts.reduce((acc, shift) => {
       acc[shift.shift_date] = { marked: true, dotColor: colors.primary };
@@ -411,6 +424,27 @@ export function ShiftCalendarScreen() {
     }));
     setAddModalVisible(true);
   }, [employees]);
+
+  const openAddModalSafe = useCallback(async () => {
+    if (employees.length) {
+      openAddModal();
+      return;
+    }
+
+    const latestEmployees = await loadEmployeeOptions();
+    if (!latestEmployees.length) {
+      setError("先に従業員を追加してください。");
+      return;
+    }
+
+    setError(null);
+    setFormError(null);
+    setShiftForm((current) => ({
+      ...current,
+      employeeId: current.employeeId || latestEmployees[0].id
+    }));
+    setAddModalVisible(true);
+  }, [employees, loadEmployeeOptions, openAddModal]);
 
   const closeAddModal = useCallback(() => {
     if (isSavingShift) {
@@ -695,7 +729,7 @@ export function ShiftCalendarScreen() {
       />
       <PrimaryButton
         label="この日にシフトを追加"
-        onPress={openAddModal}
+        onPress={() => void openAddModalSafe()}
         disabled={isExporting || isSyncingSheets}
       />
       <PrimaryButton

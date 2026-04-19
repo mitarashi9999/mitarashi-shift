@@ -113,7 +113,9 @@ async function readLocalEmployees() {
     if (!Array.isArray(parsed)) {
       return [] as Profile[];
     }
-    return parsed.filter((row) => row?.role === "employee");
+    return parsed
+      .filter((row) => row && (row.role === "employee" || !row.role))
+      .map((row) => ({ ...row, role: "employee" as const }));
   } catch {
     return [] as Profile[];
   }
@@ -186,7 +188,9 @@ export function EmployeesScreen() {
         return;
       }
 
-      setEmployees(data ?? []);
+      const remoteEmployees = data ?? [];
+      setEmployees(remoteEmployees);
+      await writeLocalEmployees(remoteEmployees);
       setError(null);
       setIsTimedOut(false);
     } catch (cause) {
@@ -318,14 +322,12 @@ export function EmployeesScreen() {
         return;
       }
 
-      setEmployees((current) =>
-        [
-          ...current.filter((item) => item.id !== createdProfile.id),
-          createdProfile
-        ].sort((a, b) =>
-          a.name.localeCompare(b.name)
-        )
-      );
+      const nextEmployees = [
+        ...employees.filter((item) => item.id !== createdProfile.id),
+        createdProfile
+      ].sort((a, b) => a.name.localeCompare(b.name));
+      setEmployees(nextEmployees);
+      await writeLocalEmployees(nextEmployees);
       setError(null);
       setIsTimedOut(false);
       setAddModalVisible(false);
@@ -378,7 +380,9 @@ export function EmployeesScreen() {
       return;
     }
 
-    setEmployees((current) => current.filter((item) => item.id !== employee.id));
+    const nextEmployees = employees.filter((item) => item.id !== employee.id);
+    setEmployees(nextEmployees);
+    await writeLocalEmployees(nextEmployees);
     setError(null);
   }, [employees, isLocalMode]);
 
