@@ -1,7 +1,9 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { Ionicons } from "@expo/vector-icons";
+import { LoginScreen } from "@/screens/auth/LoginScreen";
+import { SplashScreen } from "@/screens/common/SplashScreen";
 import { SettingsScreen } from "@/screens/common/SettingsScreen";
 import { AdminHomeScreen } from "@/screens/admin/AdminHomeScreen";
 import { EmployeesScreen } from "@/screens/admin/EmployeesScreen";
@@ -11,6 +13,8 @@ import { EmployeeHomeScreen } from "@/screens/employee/EmployeeHomeScreen";
 import { MyShiftScreen } from "@/screens/employee/MyShiftScreen";
 import { EmployeeChatScreen } from "@/screens/employee/EmployeeChatScreen";
 import { AnnouncementsScreen } from "@/screens/employee/AnnouncementsScreen";
+import { restoreLocalProfileSession } from "@/lib/localSessionAuth";
+import { useAuthStore } from "@/store/authStore";
 import { colors } from "@/theme/colors";
 
 const Tab = createBottomTabNavigator();
@@ -100,9 +104,57 @@ function EmployeeTabs() {
 }
 
 export function AppNavigator() {
+  const {
+    isBootstrapping,
+    profile,
+    setSession,
+    setProfile,
+    setAuthError,
+    setBootstrapping
+  } = useAuthStore();
+
+  useEffect(() => {
+    let mounted = true;
+
+    void (async () => {
+      const restored = await restoreLocalProfileSession();
+      if (!mounted) {
+        return;
+      }
+
+      if (restored) {
+        setSession(restored.session);
+        setProfile(restored.profile);
+        setAuthError("[LOCAL_PROFILE_RESTORED]");
+      } else {
+        setSession(null);
+        setProfile(null);
+        setAuthError(null);
+      }
+
+      setBootstrapping(false);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [setAuthError, setBootstrapping, setProfile, setSession]);
+
+  if (isBootstrapping) {
+    return <SplashScreen />;
+  }
+
+  if (!profile) {
+    return (
+      <NavigationContainer>
+        <LoginScreen />
+      </NavigationContainer>
+    );
+  }
+
   return (
     <NavigationContainer>
-      <AdminTabs />
+      {profile.role === "admin" ? <AdminTabs /> : <EmployeeTabs />}
     </NavigationContainer>
   );
 }

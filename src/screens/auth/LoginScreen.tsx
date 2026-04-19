@@ -1,152 +1,213 @@
-import React, { useMemo, useState } from "react";
-import { KeyboardAvoidingView, Platform, StyleSheet, View } from "react-native";
-import { Header } from "@/components/Header";
-import { FormInput } from "@/components/FormInput";
-import { PrimaryButton } from "@/components/PrimaryButton";
+import React, { useCallback, useEffect, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { EmptyState } from "@/components/EmptyState";
 import { ErrorBanner } from "@/components/ErrorBanner";
+import { Header } from "@/components/Header";
+import { LoadingOverlay } from "@/components/LoadingOverlay";
+import { PrimaryButton } from "@/components/PrimaryButton";
 import {
-  createLocalAdminProfile,
-  createLocalAdminSession,
-  isLocalAdminConfigured,
-  persistLocalAdminSession,
-  validateLocalAdminCredentials
-} from "@/lib/localAdminAuth";
-import {
-  isSupabaseConfigured,
-  supabase,
-  supabaseConfigStatus
-} from "@/lib/supabase";
+  createDefaultAdminProfile,
+  createSessionFromProfile,
+  persistLocalProfile
+} from "@/lib/localSessionAuth";
+import { supabase } from "@/lib/supabase";
 import { useAuthStore } from "@/store/authStore";
+import { Profile } from "@/types/app";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 
-function getConfigErrorMessage() {
-  switch (supabaseConfigStatus.code) {
-    case "ENV_URL_MISSING":
-      return "[ENV_URL_MISSING] EXPO_PUBLIC_SUPABASE_URL is missing.";
-    case "ENV_KEY_MISSING":
-      return "[ENV_KEY_MISSING] EXPO_PUBLIC_SUPABASE_ANON_KEY is missing.";
-    case "ENV_KEY_PLACEHOLDER":
-      return "[ENV_KEY_PLACEHOLDER] Replace the placeholder key in .env.";
-    case "ENV_KEY_INVALID_FORMAT":
-      return "[ENV_KEY_INVALID_FORMAT] Use sb_publishable_... key.";
-    default:
-      return "";
+const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
+const PROFILE_COLUMNS =
+  "id, role, name, employee_code, phone, department, status";
+
+function isProfilesTableMissing(message: string) {
+  return (
+    message.includes("Could not find the table 'public.profiles'") ||
+    message.includes("relation \"public.profiles\" does not exist") ||
+    message.includes("public.profiles")
+  );
+}
+
+function normalizeEmployeeProfiles(list: Profile[]) {
+  return list.filter((item) => item.role === "employee");
+}
+
+async function readLocalEmployees() {
+  const raw = await AsyncStorage.getItem(LOCAL_EMPLOYEES_KEY);
+  if (!raw) {
+    return [] as Profile[];
+  }
+  try {
+    const parsed = JSON.parse(raw) as Profile[];
+    if (!Array.isArray(parsed)) {
+      return [] as Profile[];
+    }
+    return normalizeEmployeeProfiles(parsed);
+  } catch {
+    return [] as Profile[];
   }
 }
 
+function mergeEmployees(remoteEmployees: Profile[], localEmployees: Profile[]) {
+  const map = new Map<string, Profile>();
+  localEmployees.forEach((row) => map.set(row.id, row));
+  remoteEmployees.forEach((row) => map.set(row.id, row));
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function LoginScreen() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const { authError, setSession, setProfile, setAuthError } = useAuthStore();
-  const configErrorMessage = useMemo(() => getConfigErrorMessage(), []);
-  const allowLocalAdminLogin = isLocalAdminConfigured();
+  const [employees, setEmployees] = useState<Profile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const { setSession, setProfile, setAuthError } = useAuthStore();
 
-  const handleLogin = async () => {
-    const normalizedEmail = email.trim().toLowerCase();
+  const loadEmployees = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const localEmployees = await readLocalEmployees();
 
-    if (allowLocalAdminLogin) {
-      if (!validateLocalAdminCredentials(normalizedEmail, password)) {
-        setError("指定された管理者メールアドレスまたはパスワードが一致しません。");
-        return;
-      }
-
-      setLoading(true);
-      setError("");
-      await persistLocalAdminSession(normalizedEmail);
-      setSession(createLocalAdminSession(normalizedEmail));
-      setProfile(createLocalAdminProfile(normalizedEmail));
-      setAuthError("[LOCAL_ADMIN_AUTH]");
+    if (!supabase) {
+      setEmployees(localEmployees);
       setLoading(false);
       return;
     }
 
-    if (!supabase) {
-      setError(`${configErrorMessage} Restart dev server after .env update.`);
+    const profileResult = await supabase
+      .from("profiles")
+      .select(PROFILE_COLUMNS)
+      .eq("role", "employee")
+      .order("name", { ascending: true });
+
+    if (profileResult.error) {
+      if (!isProfilesTableMissing(profileResult.error.message)) {
+        setError(`従業員一覧の取得に失敗しました: ${profileResult.error.message}`);
+      }
+      setEmployees(localEmployees);
+      setLoading(false);
       return;
     }
 
-    setLoading(true);
-    setError("");
-
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: normalizedEmail,
-      password
-    });
-
-    if (signInError) {
-      setError(signInError.message);
-    }
-
+    const remoteEmployees = normalizeEmployeeProfiles(
+      (profileResult.data ?? []) as Profile[]
+    );
+    setEmployees(mergeEmployees(remoteEmployees, localEmployees));
     setLoading(false);
-  };
+  }, []);
+
+  useEffect(() => {
+    void loadEmployees();
+  }, [loadEmployees]);
+
+  const loginWithProfile = useCallback(
+    async (targetProfile: Profile, authTag: string) => {
+      await persistLocalProfile(targetProfile);
+      setSession(createSessionFromProfile(targetProfile));
+      setProfile(targetProfile);
+      setAuthError(authTag);
+    },
+    [setAuthError, setProfile, setSession]
+  );
+
+  const handleAdminLogin = useCallback(async () => {
+    await loginWithProfile(createDefaultAdminProfile(), "[LOCAL_ADMIN_PICK]");
+  }, [loginWithProfile]);
+
+  const handleEmployeeLogin = useCallback(
+    async (employee: Profile) => {
+      await loginWithProfile(employee, "[LOCAL_EMPLOYEE_PICK]");
+    },
+    [loginWithProfile]
+  );
+
+  if (loading) {
+    return <LoadingOverlay message="従業員一覧を準備しています..." />;
+  }
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <View style={styles.content}>
-        <Header
-          title="ログイン"
-          subtitle="管理者・従業員どちらも同じ画面からログインできます"
-        />
-        <View style={styles.form}>
-          {!isSupabaseConfigured ? (
-            <ErrorBanner
-              message={`${configErrorMessage} Restart required: npm run dev`}
-            />
-          ) : null}
-          {!isSupabaseConfigured ? (
-            <ErrorBanner
-              message={`diagnostic: code=${supabaseConfigStatus.code}, url=${supabaseConfigStatus.hasUrl ? "set" : "empty"}, key=${supabaseConfigStatus.keyPreview}`}
-            />
-          ) : null}
-          {authError ? <ErrorBanner message={`auth: ${authError}`} /> : null}
-          <FormInput
-            label="メールアドレス"
-            value={email}
-            onChangeText={setEmail}
-            placeholder="name@example.com"
-          />
-          <FormInput
-            label="パスワード"
-            value={password}
-            onChangeText={setPassword}
-            placeholder="********"
-            secureTextEntry
-          />
-          {error ? <ErrorBanner message={error} /> : null}
-          <PrimaryButton
-            label={loading ? "ログイン中..." : "ログイン"}
-            onPress={handleLogin}
-            disabled={
-              loading ||
-              !email ||
-              !password ||
-              (!isSupabaseConfigured && !allowLocalAdminLogin)
-            }
-          />
-        </View>
+    <ScrollView contentContainerStyle={styles.container}>
+      <Header
+        title="ログイン"
+        subtitle="従業員は一覧から選択するだけでログインできます"
+      />
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>管理者</Text>
+        <PrimaryButton label="管理者で入る" onPress={() => void handleAdminLogin()} />
       </View>
-    </KeyboardAvoidingView>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>従業員</Text>
+        {error ? <ErrorBanner message={error} /> : null}
+        {employees.length ? (
+          <View style={styles.employeeList}>
+            {employees.map((employee) => (
+              <Pressable
+                key={employee.id}
+                onPress={() => void handleEmployeeLogin(employee)}
+                style={({ pressed }) => [
+                  styles.employeeCard,
+                  pressed && styles.employeeCardPressed
+                ]}
+              >
+                <Text style={styles.employeeName}>{employee.name}</Text>
+                <Text style={styles.employeeMeta}>
+                  社員コード: {employee.employee_code || "未設定"}
+                </Text>
+                <Text style={styles.employeeMeta}>
+                  部署: {employee.department || "未設定"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : (
+          <EmptyState
+            title="従業員がまだいません"
+            description="管理者画面で従業員を追加すると、ここに表示されます。"
+          />
+        )}
+      </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
-    backgroundColor: colors.background
-  },
-  content: {
-    flex: 1,
-    justifyContent: "center",
-    paddingHorizontal: spacing.xl,
+    flexGrow: 1,
+    backgroundColor: colors.background,
+    padding: spacing.xl,
     gap: spacing.xl
   },
-  form: {
-    gap: spacing.lg
+  section: {
+    gap: spacing.md
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: colors.text
+  },
+  employeeList: {
+    gap: spacing.sm
+  },
+  employeeCard: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    backgroundColor: colors.surface,
+    padding: spacing.lg,
+    gap: spacing.xs
+  },
+  employeeCardPressed: {
+    opacity: 0.8
+  },
+  employeeName: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: colors.text
+  },
+  employeeMeta: {
+    fontSize: 13,
+    color: colors.subtext
   }
 });
+

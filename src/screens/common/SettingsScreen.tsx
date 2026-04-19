@@ -1,30 +1,40 @@
 import React from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { Header } from "@/components/Header";
-import { ErrorBanner } from "@/components/ErrorBanner";
-import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { PrimaryButton } from "@/components/PrimaryButton";
+import { clearLocalProfile } from "@/lib/localSessionAuth";
+import { supabase } from "@/lib/supabase";
+import { useAuthStore } from "@/store/authStore";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 
 export function SettingsScreen() {
+  const { profile, setSession, setProfile, setAuthError } = useAuthStore();
+
+  const handleLogout = async () => {
+    await clearLocalProfile();
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+    setSession(null);
+    setProfile(null);
+    setAuthError(null);
+  };
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Header title="設定" subtitle="基本設定を確認できます" />
-      {!isSupabaseConfigured ? (
-        <ErrorBanner message="Supabase未設定のため、認証系機能は利用できません。" />
-      ) : null}
+      <Header title="設定" subtitle="現在のログイン情報を確認できます" />
       <View style={styles.card}>
-        <Text style={styles.title}>ログイン機能は無効です</Text>
-        <Text style={styles.description}>
-          このアプリはログインなしで直接利用する設定です。
+        <Text style={styles.title}>ログイン中</Text>
+        <Text style={styles.detail}>名前: {profile?.name ?? "-"}</Text>
+        <Text style={styles.detail}>
+          役割: {profile?.role === "admin" ? "管理者" : "従業員"}
         </Text>
-        <Text style={styles.description}>
-          認証を再度有効化する場合は、ナビゲーション設定を戻してください。
-        </Text>
-        <Text style={styles.meta}>
-          Supabase状態: {supabase ? "接続設定あり" : "未設定"}
+        <Text style={styles.detail}>
+          社員コード: {profile?.employee_code || "未設定"}
         </Text>
       </View>
+      <PrimaryButton label="ログアウト" onPress={() => void handleLogout()} variant="danger" />
     </ScrollView>
   );
 }
@@ -33,7 +43,8 @@ const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
     backgroundColor: colors.background,
-    padding: spacing.xl
+    padding: spacing.xl,
+    gap: spacing.lg
   },
   card: {
     backgroundColor: colors.surface,
@@ -46,15 +57,9 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: colors.text
   },
-  description: {
+  detail: {
     fontSize: 14,
-    lineHeight: 20,
     color: colors.subtext
-  },
-  meta: {
-    marginTop: spacing.xs,
-    fontSize: 12,
-    color: colors.primary,
-    fontWeight: "700"
   }
 });
+
