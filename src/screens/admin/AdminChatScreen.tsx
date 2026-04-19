@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
@@ -6,36 +6,23 @@ import {
   ScrollView,
   StyleSheet
 } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
 import { ChatInput } from "@/components/ChatInput";
+import { ErrorBanner } from "@/components/ErrorBanner";
 import { Header } from "@/components/Header";
 import { MessageBubble } from "@/components/MessageBubble";
+import { appendDirectMessage, readDirectMessages } from "@/lib/localChat";
 import { useAuthStore } from "@/store/authStore";
 import { Message } from "@/types/app";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 
-const initialMessages: Message[] = [
-  {
-    id: "1",
-    room_id: "global",
-    sender_id: "system-admin",
-    content: "本日は10時開店です。準備をお願いします。",
-    created_at: "2026-04-10T08:00:00+09:00",
-    read_flag: true
-  },
-  {
-    id: "2",
-    room_id: "global",
-    sender_id: "system-employee",
-    content: "了解しました。",
-    created_at: "2026-04-10T08:05:00+09:00",
-    read_flag: true
-  }
-];
+const POLL_INTERVAL_MS = 1500;
 
 export function AdminChatScreen() {
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState<Message[]>(initialMessages);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const { profile, session } = useAuthStore();
 
   const myId = useMemo(
@@ -43,33 +30,58 @@ export function AdminChatScreen() {
     [profile?.id, session?.user.id]
   );
 
-  const handleSend = () => {
+  const loadMessages = useCallback(async () => {
+    try {
+      const rows = await readDirectMessages();
+      setMessages(rows);
+      setError(null);
+    } catch (cause) {
+      const messageText =
+        cause instanceof Error ? cause.message : "Unknown chat load error";
+      setError(`チャット読み込みに失敗しました: ${messageText}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadMessages();
+    const timer = setInterval(() => {
+      void loadMessages();
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [loadMessages]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadMessages();
+    }, [loadMessages])
+  );
+
+  const handleSend = useCallback(async () => {
     const content = message.trim();
     if (!content) {
       Alert.alert("送信できません", "メッセージを入力してください。");
       return;
     }
 
-    setMessages((current) => [
-      ...current,
-      {
-        id: `local-${Date.now()}`,
-        room_id: "global",
-        sender_id: myId,
-        content,
-        created_at: new Date().toISOString(),
-        read_flag: false
-      }
-    ]);
-    setMessage("");
-  };
+    try {
+      const next = await appendDirectMessage(myId, content);
+      setMessages(next);
+      setMessage("");
+      setError(null);
+    } catch (cause) {
+      const messageText =
+        cause instanceof Error ? cause.message : "Unknown chat send error";
+      setError(`送信に失敗しました: ${messageText}`);
+    }
+  }, [message, myId]);
 
   return (
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
-      <Header title="チャット" subtitle="全体連絡と個人チャットを確認できます" />
+      <Header title="チャット" subtitle="従業員との連絡をここで確認・送信できます" />
+      {error ? <ErrorBanner message={error} /> : null}
       <ScrollView contentContainerStyle={styles.messages}>
         {messages.map((item) => (
           <MessageBubble
@@ -79,7 +91,7 @@ export function AdminChatScreen() {
           />
         ))}
       </ScrollView>
-      <ChatInput value={message} onChangeText={setMessage} onSend={handleSend} />
+      <ChatInput value={message} onChangeText={setMessage} onSend={() => void handleSend()} />
     </KeyboardAvoidingView>
   );
 }
