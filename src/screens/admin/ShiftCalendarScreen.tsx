@@ -931,12 +931,14 @@ export function ShiftCalendarScreen() {
               <FormInput
                 label="開始時刻 (HH:mm)"
                 value={shiftForm.startTime}
+                mode="time"
                 onChangeText={(value) => updateShiftForm("startTime", value)}
                 placeholder="例: 09:00"
               />
               <FormInput
                 label="終了時刻 (HH:mm)"
                 value={shiftForm.endTime}
+                mode="time"
                 onChangeText={(value) => updateShiftForm("endTime", value)}
                 placeholder="例: 18:00"
               />
