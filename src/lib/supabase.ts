@@ -3,6 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL || "").trim();
 const supabaseAnonKey = (process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || "").trim();
+const appReadToken = (process.env.EXPO_PUBLIC_APP_READ_TOKEN || "").trim();
+const appWriteToken = (process.env.EXPO_PUBLIC_APP_WRITE_TOKEN || "").trim();
 const isPlaceholderKey =
   /PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY_HERE/i.test(supabaseAnonKey) ||
   /PASTE_/i.test(supabaseAnonKey);
@@ -42,6 +44,12 @@ export const isSupabaseConfigured = supabaseConfigStatus.code === "OK";
 
 export const supabase = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey, {
+      global: {
+        headers: {
+          ...(appReadToken ? { "x-app-token": appReadToken } : {}),
+          ...(appWriteToken ? { "x-app-write-token": appWriteToken } : {})
+        }
+      },
       auth: {
         storage: AsyncStorage,
         autoRefreshToken: true,
