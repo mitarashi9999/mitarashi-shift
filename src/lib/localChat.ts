@@ -47,3 +47,22 @@ export async function appendDirectMessage(senderId: string, content: string) {
   await AsyncStorage.setItem(LOCAL_DIRECT_CHAT_KEY, JSON.stringify(sorted));
   return sorted;
 }
+
+export async function removeDirectMessage(
+  messageId: string,
+  senderId?: string
+) {
+  const current = await readDirectMessages();
+  const next = current.filter((item) => {
+    if (item.id !== messageId) {
+      return true;
+    }
+    if (!senderId) {
+      return false;
+    }
+    return item.sender_id !== senderId;
+  });
+  const sorted = sortMessages(next);
+  await AsyncStorage.setItem(LOCAL_DIRECT_CHAT_KEY, JSON.stringify(sorted));
+  return sorted;
+}

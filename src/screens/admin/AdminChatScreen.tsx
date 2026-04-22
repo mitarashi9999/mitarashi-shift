@@ -11,7 +11,11 @@ import { ChatInput } from "@/components/ChatInput";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { Header } from "@/components/Header";
 import { MessageBubble } from "@/components/MessageBubble";
-import { appendDirectMessage, readDirectMessages } from "@/lib/localChat";
+import {
+  appendDirectMessage,
+  readDirectMessages,
+  removeDirectMessage
+} from "@/lib/localChat";
 import { useAuthStore } from "@/store/authStore";
 import { Message } from "@/types/app";
 import { colors } from "@/theme/colors";
@@ -75,6 +79,44 @@ export function AdminChatScreen() {
     }
   }, [message, myId]);
 
+  const handleDeleteMessage = useCallback(
+    async (target: Message) => {
+      if (target.sender_id !== myId) {
+        return;
+      }
+
+      const executeDelete = async () => {
+        try {
+          const next = await removeDirectMessage(target.id, myId);
+          setMessages(next);
+          setError(null);
+        } catch (cause) {
+          const messageText =
+            cause instanceof Error ? cause.message : "Unknown chat delete error";
+          setError(`削除に失敗しました: ${messageText}`);
+        }
+      };
+
+      if (Platform.OS === "web") {
+        const accepted = window.confirm("このメッセージを削除しますか？");
+        if (accepted) {
+          await executeDelete();
+        }
+        return;
+      }
+
+      Alert.alert("メッセージ削除", "このメッセージを削除しますか？", [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "削除",
+          style: "destructive",
+          onPress: () => void executeDelete()
+        }
+      ]);
+    },
+    [myId]
+  );
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -88,6 +130,11 @@ export function AdminChatScreen() {
             key={item.id}
             message={item}
             isMine={item.sender_id === myId}
+            onDelete={
+              item.sender_id === myId
+                ? () => void handleDeleteMessage(item)
+                : undefined
+            }
           />
         ))}
       </ScrollView>
