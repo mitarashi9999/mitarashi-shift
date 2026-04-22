@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorBanner } from "@/components/ErrorBanner";
@@ -17,7 +16,6 @@ import { Profile } from "@/types/app";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 
-const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
 const PROFILE_COLUMNS =
   "id, role, name, employee_code, phone, department, status";
 
@@ -30,30 +28,9 @@ function isProfilesTableMissing(message: string) {
 }
 
 function normalizeEmployeeProfiles(list: Profile[]) {
-  return list.filter((item) => item.role === "employee");
-}
-
-async function readLocalEmployees() {
-  const raw = await AsyncStorage.getItem(LOCAL_EMPLOYEES_KEY);
-  if (!raw) {
-    return [] as Profile[];
-  }
-  try {
-    const parsed = JSON.parse(raw) as Profile[];
-    if (!Array.isArray(parsed)) {
-      return [] as Profile[];
-    }
-    return normalizeEmployeeProfiles(parsed);
-  } catch {
-    return [] as Profile[];
-  }
-}
-
-function mergeEmployees(remoteEmployees: Profile[], localEmployees: Profile[]) {
-  const map = new Map<string, Profile>();
-  localEmployees.forEach((row) => map.set(row.id, row));
-  remoteEmployees.forEach((row) => map.set(row.id, row));
-  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return list
+    .filter((item) => item.role === "employee")
+    .sort((a, b) => a.name.localeCompare(b.name, "ja"));
 }
 
 export function LoginScreen() {
@@ -65,10 +42,10 @@ export function LoginScreen() {
   const loadEmployees = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const localEmployees = await readLocalEmployees();
 
     if (!supabase) {
-      setEmployees(localEmployees);
+      setEmployees([]);
+      setError("Supabase未設定です。.env / Vercel Environment Variables を確認してください。");
       setLoading(false);
       return;
     }
@@ -80,10 +57,12 @@ export function LoginScreen() {
       .order("name", { ascending: true });
 
     if (profileResult.error) {
-      if (!isProfilesTableMissing(profileResult.error.message)) {
+      if (isProfilesTableMissing(profileResult.error.message)) {
+        setError("profilesテーブルが存在しません。先にテーブルを作成してください。");
+      } else {
         setError(`従業員一覧の取得に失敗しました: ${profileResult.error.message}`);
       }
-      setEmployees(localEmployees);
+      setEmployees([]);
       setLoading(false);
       return;
     }
@@ -91,7 +70,7 @@ export function LoginScreen() {
     const remoteEmployees = normalizeEmployeeProfiles(
       (profileResult.data ?? []) as Profile[]
     );
-    setEmployees(mergeEmployees(remoteEmployees, localEmployees));
+    setEmployees(remoteEmployees);
     setLoading(false);
   }, []);
 
@@ -121,19 +100,19 @@ export function LoginScreen() {
   );
 
   if (loading) {
-    return <LoadingOverlay message="従業員一覧を準備しています..." />;
+    return <LoadingOverlay message="従業員一覧を取得しています..." />;
   }
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Header
         title="ログイン"
-        subtitle="従業員は一覧から選択するだけでログインできます"
+        subtitle="管理者は固定ボタン、従業員は一覧から選択してログインします"
       />
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>管理者</Text>
-        <PrimaryButton label="管理者で入る" onPress={() => void handleAdminLogin()} />
+        <PrimaryButton label="管理者として入る" onPress={() => void handleAdminLogin()} />
       </View>
 
       <View style={styles.section}>
@@ -210,4 +189,3 @@ const styles = StyleSheet.create({
     color: colors.subtext
   }
 });
-

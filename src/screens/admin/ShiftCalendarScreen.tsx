@@ -22,7 +22,7 @@ import { Header } from "@/components/Header";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { ShiftCard } from "@/components/ShiftCard";
 import { supabase } from "@/lib/supabase";
-import { Profile, Shift } from "@/types/app";
+import { Shift } from "@/types/app";
 import { colors } from "@/theme/colors";
 import { spacing } from "@/theme/spacing";
 
@@ -57,7 +57,6 @@ const sheetsWebhookUrl = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_URL || "
 const sheetsWebhookToken = (process.env.EXPO_PUBLIC_GOOGLE_SHEETS_WEBHOOK_TOKEN || "").trim();
 const sheetsProxyUrl = (process.env.EXPO_PUBLIC_SHEETS_PROXY_URL || "/api/sheets-sync").trim();
 const LOCAL_SHIFTS_KEY = "shift_local_shifts_v1";
-const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
 const SHIFT_TYPE_OPTIONS = ["バッテリー交換", "シェア配送"] as const;
 
 type ShiftForm = {
@@ -183,42 +182,6 @@ async function writeLocalShifts(shifts: Shift[]) {
   await AsyncStorage.setItem(LOCAL_SHIFTS_KEY, JSON.stringify(sortShifts(shifts)));
 }
 
-async function readLocalEmployees() {
-  const raw = await AsyncStorage.getItem(LOCAL_EMPLOYEES_KEY);
-  if (!raw) {
-    return [] as Pick<Profile, "id" | "name">[];
-  }
-  try {
-    const parsed = JSON.parse(raw) as Profile[];
-    if (!Array.isArray(parsed)) {
-      return [] as Pick<Profile, "id" | "name">[];
-    }
-    return parsed
-      .filter((row) => row && (row.role === "employee" || !row.role))
-      .map((row) => ({ id: row.id, name: row.name }));
-  } catch {
-    return [] as Pick<Profile, "id" | "name">[];
-  }
-}
-
-function mergeEmployeeRows(
-  localEmployees: ProfileNameRow[],
-  remoteEmployees: ProfileNameRow[]
-) {
-  const map = new Map<string, ProfileNameRow>();
-  localEmployees.forEach((row) => {
-    if (row?.id) {
-      map.set(row.id, { id: row.id, name: row.name ?? "" });
-    }
-  });
-  remoteEmployees.forEach((row) => {
-    if (row?.id) {
-      map.set(row.id, { id: row.id, name: row.name ?? "" });
-    }
-  });
-  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, "ja"));
-}
-
 export function ShiftCalendarScreen() {
   const [selectedDate, setSelectedDate] = useState(dayjs().format("YYYY-MM-DD"));
   const [shifts, setShifts] = useState<Shift[]>([]);
@@ -252,9 +215,8 @@ export function ShiftCalendarScreen() {
       return rows;
     };
 
-    const localEmployees = await readLocalEmployees();
-    if (!supabase || isLocalMode) {
-      return applyRows(localEmployees);
+    if (!supabase) {
+      return applyRows([]);
     }
 
     const profileResult = await supabase
@@ -264,16 +226,14 @@ export function ShiftCalendarScreen() {
       .order("name", { ascending: true });
 
     if (profileResult.error) {
-      if (profileResult.error.message.includes("public.profiles")) {
-        setIsLocalMode(true);
-      }
-      return applyRows(localEmployees);
+      return applyRows([]);
     }
 
-    const remoteRows = (profileResult.data ?? []) as ProfileNameRow[];
-    const mergedRows = mergeEmployeeRows(localEmployees, remoteRows);
-    return applyRows(mergedRows);
-  }, [isLocalMode]);
+    const remoteRows = ((profileResult.data ?? []) as ProfileNameRow[]).sort((a, b) =>
+      (a.name ?? "").localeCompare(b.name ?? "", "ja")
+    );
+    return applyRows(remoteRows);
+  }, []);
 
   const loadData = useCallback(async (targetDate: string) => {
     const monthKey = dayjs(targetDate).format("YYYY-MM");

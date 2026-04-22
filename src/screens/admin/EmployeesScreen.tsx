@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   Alert,
   FlatList,
@@ -26,7 +25,6 @@ import { spacing } from "@/theme/spacing";
 const PROFILE_COLUMNS =
   "id, role, name, employee_code, phone, department, status";
 const REQUEST_TIMEOUT_MS = 10000;
-const LOCAL_EMPLOYEES_KEY = "shift_local_employees_v1";
 
 type EmployeeForm = {
   name: string;
@@ -62,19 +60,6 @@ async function withTimeout<T>(
   }
 }
 
-function formatAddEmployeeError(message: string) {
-  if (message.includes("duplicate key")) {
-    return "社員コードが重複しています。別の社員コードを入力してください。";
-  }
-  if (message.includes("row-level security")) {
-    return "権限エラーです。管理者アカウントでログインし直してください。";
-  }
-  if (message.includes("foreign key constraint")) {
-    return "従業員追加に必要な関連データ作成に失敗しました。SupabaseのAuth設定を確認してください。";
-  }
-  return `従業員追加に失敗しました: ${message}`;
-}
-
 function createUuidV4() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
     const random = Math.floor(Math.random() * 16);
@@ -91,38 +76,20 @@ function isProfilesTableMissing(message: string) {
   );
 }
 
-function buildLocalEmployee(form: EmployeeForm): Profile {
-  return {
-    id: `local-employee-${createUuidV4()}`,
-    role: "employee",
-    name: form.name.trim(),
-    employee_code: form.employeeCode.trim() || null,
-    phone: form.phone.trim() || null,
-    department: form.department.trim() || null,
-    status: "active"
-  };
-}
-
-async function readLocalEmployees() {
-  const raw = await AsyncStorage.getItem(LOCAL_EMPLOYEES_KEY);
-  if (!raw) {
-    return [] as Profile[];
+function formatAddEmployeeError(message: string) {
+  if (isProfilesTableMissing(message)) {
+    return "profilesテーブルが存在しません。Supabaseでテーブル作成後に再実行してください。";
   }
-  try {
-    const parsed = JSON.parse(raw) as Profile[];
-    if (!Array.isArray(parsed)) {
-      return [] as Profile[];
-    }
-    return parsed
-      .filter((row) => row && (row.role === "employee" || !row.role))
-      .map((row) => ({ ...row, role: "employee" as const }));
-  } catch {
-    return [] as Profile[];
+  if (message.includes("duplicate key")) {
+    return "社員コードが重複しています。別の社員コードで登録してください。";
   }
-}
-
-async function writeLocalEmployees(employees: Profile[]) {
-  await AsyncStorage.setItem(LOCAL_EMPLOYEES_KEY, JSON.stringify(employees));
+  if (message.includes("row-level security")) {
+    return "RLSポリシーで拒否されました。profilesテーブルの権限設定を確認してください。";
+  }
+  if (message.includes("permission denied")) {
+    return "profilesテーブルへの権限が不足しています。Supabaseの権限を確認してください。";
+  }
+  return `従業員追加に失敗しました: ${message}`;
 }
 
 export function EmployeesScreen() {
@@ -135,19 +102,14 @@ export function EmployeesScreen() {
   const [form, setForm] = useState<EmployeeForm>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
-  const [isLocalMode, setIsLocalMode] = useState(false);
 
   const loadEmployees = useCallback(async (refresh = false) => {
-    if (!supabase || isLocalMode) {
-      const locals = await readLocalEmployees();
-      setEmployees(locals);
-      setError(
-        isLocalMode
-          ? "Supabaseのprofilesテーブルが未作成のため、ローカル保存モードで動作中です。"
-          : "Supabase未接続のため、ローカル保存モードで動作中です。"
-      );
+    if (!supabase) {
+      setEmployees([]);
+      setError("Supabase未設定です。.env / Vercel Environment Variables を確認してください。");
       setIsTimedOut(false);
       setIsLoading(false);
+      setIsRefreshing(false);
       return;
     }
 
@@ -175,10 +137,8 @@ export function EmployeesScreen() {
 
       if (fetchError) {
         if (isProfilesTableMissing(fetchError.message)) {
-          const locals = await readLocalEmployees();
-          setEmployees(locals);
-          setIsLocalMode(true);
-          setError("profilesテーブルが未作成のため、ローカル保存モードに切り替えました。");
+          setEmployees([]);
+          setError("profilesテーブルが見つかりません。SupabaseのSQLで作成してください。");
           setIsTimedOut(false);
           return;
         }
@@ -188,9 +148,7 @@ export function EmployeesScreen() {
         return;
       }
 
-      const remoteEmployees = data ?? [];
-      setEmployees(remoteEmployees);
-      await writeLocalEmployees(remoteEmployees);
+      setEmployees(data ?? []);
       setError(null);
       setIsTimedOut(false);
     } catch (cause) {
@@ -201,12 +159,11 @@ export function EmployeesScreen() {
         setError(null);
         setIsTimedOut(true);
       } else if (isProfilesTableMissing(message)) {
-        const locals = await readLocalEmployees();
-        setEmployees(locals);
-        setIsLocalMode(true);
-        setError("profilesテーブルが未作成のため、ローカル保存モードに切り替えました。");
+        setEmployees([]);
+        setError("profilesテーブルが見つかりません。SupabaseのSQLで作成してください。");
         setIsTimedOut(false);
       } else {
+        setEmployees([]);
         setError(`従業員の取得に失敗しました: ${message}`);
         setIsTimedOut(false);
       }
@@ -214,7 +171,7 @@ export function EmployeesScreen() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [isLocalMode]);
+  }, []);
 
   useEffect(() => {
     void loadEmployees();
@@ -242,9 +199,12 @@ export function EmployeesScreen() {
 
   const handleSubmitAdd = useCallback(async () => {
     const name = form.name.trim();
-
     if (!name) {
       setFormError("氏名は必須です。");
+      return;
+    }
+    if (!supabase) {
+      setFormError("Supabase未設定のため追加できません。");
       return;
     }
 
@@ -252,82 +212,47 @@ export function EmployeesScreen() {
     setFormError(null);
 
     try {
-      if (!supabase || isLocalMode) {
-        const localEmployee = buildLocalEmployee(form);
-        const nextEmployees = [...employees, localEmployee].sort((a, b) =>
-          a.name.localeCompare(b.name)
-        );
-        await writeLocalEmployees(nextEmployees);
-        setEmployees(nextEmployees);
-        setIsLocalMode(true);
-        setError("ローカル保存モードで従業員を追加しました。");
-        setIsTimedOut(false);
-        setAddModalVisible(false);
-        setForm(EMPTY_FORM);
+      const requestPromise = supabase
+        .from("profiles")
+        .upsert(
+          {
+            id: createUuidV4(),
+            role: "employee",
+            name,
+            employee_code: form.employeeCode.trim() || null,
+            phone: form.phone.trim() || null,
+            department: form.department.trim() || null,
+            status: "active"
+          },
+          { onConflict: "id" }
+        )
+        .select(PROFILE_COLUMNS)
+        .single()
+        .then((result) => ({
+          data: (result.data ?? null) as Profile | null,
+          error: result.error ? { message: result.error.message } : null
+        }));
+
+      const { data, error: addError } = await withTimeout(
+        requestPromise,
+        "PROFILE_UPSERT_TIMEOUT"
+      );
+
+      if (addError) {
+        setFormError(formatAddEmployeeError(addError.message));
         return;
       }
-      const client = supabase;
 
-      const createProfile = async (targetUserId: string) => {
-        const requestPromise = client
-          .from("profiles")
-          .upsert(
-            {
-              id: targetUserId,
-              role: "employee",
-              name,
-              employee_code: form.employeeCode.trim() || null,
-              phone: form.phone.trim() || null,
-              department: form.department.trim() || null,
-              status: "active"
-            },
-            { onConflict: "id" }
-          )
-          .select(PROFILE_COLUMNS)
-          .single()
-          .then((result) => ({
-            data: (result.data ?? null) as Profile | null,
-            error: result.error ? { message: result.error.message } : null
-          }));
-        return withTimeout(requestPromise, "PROFILE_UPSERT_TIMEOUT");
-      };
-
-      let createdProfile: Profile | null = null;
-      const optimisticUserId = createUuidV4();
-      const firstTry = await createProfile(optimisticUserId);
-
-      if (firstTry.error && isProfilesTableMissing(firstTry.error.message)) {
-        const localEmployee = buildLocalEmployee(form);
-        const nextEmployees = [...employees, localEmployee].sort((a, b) =>
-          a.name.localeCompare(b.name)
-        );
-        await writeLocalEmployees(nextEmployees);
-        setEmployees(nextEmployees);
-        setIsLocalMode(true);
-        setError("profilesテーブル未作成のため、ローカル保存モードへ切り替えて追加しました。");
-        setIsTimedOut(false);
-        setAddModalVisible(false);
-        setForm(EMPTY_FORM);
-        return;
-      } else {
-        if (firstTry.error) {
-          setFormError(formatAddEmployeeError(firstTry.error.message));
-          return;
-        }
-        createdProfile = firstTry.data;
-      }
-
-      if (!createdProfile) {
-        setFormError("従業員の追加に失敗しました。");
+      if (!data) {
+        setFormError("従業員追加に失敗しました。");
         return;
       }
 
       const nextEmployees = [
-        ...employees.filter((item) => item.id !== createdProfile.id),
-        createdProfile
-      ].sort((a, b) => a.name.localeCompare(b.name));
+        ...employees.filter((item) => item.id !== data.id),
+        data
+      ].sort((a, b) => a.name.localeCompare(b.name, "ja"));
       setEmployees(nextEmployees);
-      await writeLocalEmployees(nextEmployees);
       setError(null);
       setIsTimedOut(false);
       setAddModalVisible(false);
@@ -336,55 +261,37 @@ export function EmployeesScreen() {
       const message =
         cause instanceof Error ? cause.message : "Unknown add employee error";
       if (message.includes("PROFILE_UPSERT_TIMEOUT")) {
-        setFormError(
-          "プロフィール保存がタイムアウトしました。通信状態を確認して再試行してください。"
-        );
-      } else if (isProfilesTableMissing(message)) {
-        const localEmployee = buildLocalEmployee(form);
-        const nextEmployees = [...employees, localEmployee].sort((a, b) =>
-          a.name.localeCompare(b.name)
-        );
-        await writeLocalEmployees(nextEmployees);
-        setEmployees(nextEmployees);
-        setIsLocalMode(true);
-        setError("profilesテーブル未作成のため、ローカル保存モードへ切り替えて追加しました。");
-        setIsTimedOut(false);
-        setAddModalVisible(false);
-        setForm(EMPTY_FORM);
-      } else if (message.includes("REQUEST_TIMEOUT")) {
-        setFormError("追加処理がタイムアウトしました。通信を確認して再試行してください。");
+        setFormError("従業員追加がタイムアウトしました。通信状態を確認してください。");
       } else {
         setFormError(formatAddEmployeeError(message));
       }
     } finally {
       setIsAdding(false);
     }
-  }, [employees, form, isLocalMode]);
+  }, [employees, form]);
 
-  const deleteEmployee = useCallback(async (employee: Profile) => {
-    if (!supabase || isLocalMode || employee.id.startsWith("local-employee-")) {
-      const nextEmployees = employees.filter((item) => item.id !== employee.id);
-      await writeLocalEmployees(nextEmployees);
-      setEmployees(nextEmployees);
-      setError(isLocalMode ? "ローカル保存モードで削除しました。" : null);
-      return;
-    }
+  const deleteEmployee = useCallback(
+    async (employee: Profile) => {
+      if (!supabase) {
+        setError("Supabase未設定のため削除できません。");
+        return;
+      }
 
-    const { error: deleteError } = await supabase
-      .from("profiles")
-      .delete()
-      .eq("id", employee.id);
+      const { error: deleteError } = await supabase
+        .from("profiles")
+        .delete()
+        .eq("id", employee.id);
 
-    if (deleteError) {
-      setError(`削除に失敗しました: ${deleteError.message}`);
-      return;
-    }
+      if (deleteError) {
+        setError(`削除に失敗しました: ${deleteError.message}`);
+        return;
+      }
 
-    const nextEmployees = employees.filter((item) => item.id !== employee.id);
-    setEmployees(nextEmployees);
-    await writeLocalEmployees(nextEmployees);
-    setError(null);
-  }, [employees, isLocalMode]);
+      setEmployees((current) => current.filter((item) => item.id !== employee.id));
+      setError(null);
+    },
+    []
+  );
 
   const handleEmployeePress = useCallback(
     (employee: Profile) => {
@@ -421,7 +328,10 @@ export function EmployeesScreen() {
 
   return (
     <View style={styles.container}>
-      <Header title="従業員" subtitle="カードをタップすると詳細と削除操作を開けます" />
+      <Header
+        title="従業員"
+        subtitle="カードをタップすると詳細と削除操作を開けます"
+      />
       <PrimaryButton label="従業員を追加" onPress={handleAddPress} />
       {error ? <ErrorBanner message={error} /> : null}
       <FlatList
@@ -443,7 +353,7 @@ export function EmployeesScreen() {
             title="従業員がまだいません"
             description={
               isTimedOut
-                ? "通信が不安定です。画面を下に引っ張って再読み込みしてください。"
+                ? "通信がタイムアウトしました。画面を下に引っ張って再読み込みしてください。"
                 : "「従業員を追加」から登録できます。"
             }
           />
