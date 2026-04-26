@@ -112,6 +112,27 @@ function formatAddEmployeeError(message: string) {
   return `従業員追加に失敗しました: ${message}`;
 }
 
+function shouldFallbackToDirectSupabase(apiErrorMessage: string) {
+  return (
+    apiErrorMessage.includes("Failed to fetch") ||
+    apiErrorMessage.includes("EMPLOYEES_API_TIMEOUT") ||
+    apiErrorMessage.includes("EMPLOYEES_API_URL_UNAVAILABLE")
+  );
+}
+
+function formatEmployeesApiError(message: string) {
+  if (message.includes("service_role_missing")) {
+    return "Vercelに SUPABASE_SERVICE_ROLE_KEY（または SUPABASE_SECRET_KEY）が未設定です。";
+  }
+  if (message.includes("unauthorized_write_token")) {
+    return "API書き込みトークンが不一致です。APP_WRITE_TOKEN と EXPO_PUBLIC_APP_WRITE_TOKEN を揃えてください。";
+  }
+  if (message.includes("unauthorized_read_token")) {
+    return "API読み取りトークンが不一致です。APP_READ_TOKEN と EXPO_PUBLIC_APP_READ_TOKEN を揃えてください。";
+  }
+  return `API経由の処理に失敗しました: ${message}`;
+}
+
 function sortEmployees(rows: Profile[]) {
   return [...rows].sort((a, b) => a.name.localeCompare(b.name, "ja"));
 }
@@ -228,8 +249,12 @@ export function EmployeesScreen() {
           const apiResult = await requestEmployeesApi("GET");
           setEmployees(sortEmployees(apiResult.employees ?? []));
           return;
-        } catch {
-          // API未設定時や一時エラー時はSupabase直接取得へフォールバック
+        } catch (apiCause) {
+          const apiMessage =
+            apiCause instanceof Error ? apiCause.message : "Unknown employees api error";
+          if (!shouldFallbackToDirectSupabase(apiMessage)) {
+            throw new Error(formatEmployeesApiError(apiMessage));
+          }
         }
       }
 
@@ -316,8 +341,12 @@ export function EmployeesScreen() {
           setAddModalVisible(false);
           setForm(EMPTY_FORM);
           return;
-        } catch {
-          // API失敗時はSupabase直接追加へフォールバック
+        } catch (apiCause) {
+          const apiMessage =
+            apiCause instanceof Error ? apiCause.message : "Unknown employees api error";
+          if (!shouldFallbackToDirectSupabase(apiMessage)) {
+            throw new Error(formatEmployeesApiError(apiMessage));
+          }
         }
       }
 
@@ -388,8 +417,12 @@ export function EmployeesScreen() {
             setEmployees((current) => current.filter((item) => item.id !== employee.id));
             setError(null);
             return;
-          } catch {
-            // API失敗時はSupabase直接削除へフォールバック
+          } catch (apiCause) {
+            const apiMessage =
+              apiCause instanceof Error ? apiCause.message : "Unknown employees api error";
+            if (!shouldFallbackToDirectSupabase(apiMessage)) {
+              throw new Error(formatEmployeesApiError(apiMessage));
+            }
           }
         }
 

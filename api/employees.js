@@ -25,7 +25,11 @@ function getSupabaseUrl() {
 }
 
 function getServiceRoleKey() {
-  return getEnv("SUPABASE_SERVICE_ROLE_KEY");
+  return (
+    getEnv("SUPABASE_SERVICE_ROLE_KEY") ||
+    getEnv("SUPABASE_SECRET_KEY") ||
+    getEnv("SUPABASE_SERVICE_KEY")
+  );
 }
 
 function getReadToken() {
@@ -170,7 +174,7 @@ module.exports = async function handler(req, res) {
       ok: false,
       error: clientError,
       message:
-        "Set SUPABASE_SERVICE_ROLE_KEY (and SUPABASE_URL or EXPO_PUBLIC_SUPABASE_URL) in Vercel."
+        "Set SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY (and SUPABASE_URL or EXPO_PUBLIC_SUPABASE_URL) in Vercel."
     });
     return;
   }
