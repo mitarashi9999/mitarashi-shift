@@ -116,13 +116,20 @@ function shouldFallbackToDirectSupabase(apiErrorMessage: string) {
   return (
     apiErrorMessage.includes("Failed to fetch") ||
     apiErrorMessage.includes("EMPLOYEES_API_TIMEOUT") ||
-    apiErrorMessage.includes("EMPLOYEES_API_URL_UNAVAILABLE")
+    apiErrorMessage.includes("EMPLOYEES_API_URL_UNAVAILABLE") ||
+    apiErrorMessage.includes("service_role_missing") ||
+    apiErrorMessage.includes("Set SUPABASE_SERVICE_ROLE_KEY") ||
+    apiErrorMessage.includes("unauthorized_read_token") ||
+    apiErrorMessage.includes("unauthorized_write_token")
   );
 }
 
 function formatEmployeesApiError(message: string) {
   if (message.includes("service_role_missing")) {
     return "Vercelに SUPABASE_SERVICE_ROLE_KEY（または SUPABASE_SECRET_KEY）が未設定です。";
+  }
+  if (message.includes("profiles_fk_requires_service_role_key")) {
+    return "profiles.id が auth.users を参照しています。Vercelに SUPABASE_SERVICE_ROLE_KEY（または SUPABASE_SECRET_KEY）を設定してください。";
   }
   if (message.includes("unauthorized_write_token")) {
     return "API書き込みトークンが不一致です。APP_WRITE_TOKEN と EXPO_PUBLIC_APP_WRITE_TOKEN を揃えてください。";

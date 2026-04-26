@@ -32,6 +32,10 @@ function getServiceRoleKey() {
   );
 }
 
+function getAnonKey() {
+  return getEnv("SUPABASE_ANON_KEY") || getEnv("EXPO_PUBLIC_SUPABASE_ANON_KEY");
+}
+
 function getReadToken() {
   return getEnv("APP_READ_TOKEN") || getEnv("EXPO_PUBLIC_APP_READ_TOKEN");
 }
@@ -51,7 +55,9 @@ function hasHeaderToken(req, headerName, expectedToken) {
 
 function buildClient() {
   const url = getSupabaseUrl();
-  const key = getServiceRoleKey();
+  const serviceKey = getServiceRoleKey();
+  const anonKey = getAnonKey();
+  const key = serviceKey || anonKey;
   if (!url || !key) {
     return { client: null, error: "service_role_missing" };
   }
@@ -61,7 +67,7 @@ function buildClient() {
       persistSession: false
     }
   });
-  return { client, error: null };
+  return { client, error: null, isPrivileged: Boolean(serviceKey) };
 }
 
 function isProfilesFkError(message) {
@@ -73,7 +79,7 @@ function isProfilesFkError(message) {
   );
 }
 
-async function insertEmployeeProfile(client, payload) {
+async function insertEmployeeProfile(client, payload, isPrivileged) {
   const baseRow = {
     role: "employee",
     name: payload.name.trim(),
@@ -101,6 +107,13 @@ async function insertEmployeeProfile(client, payload) {
 
   if (!isProfilesFkError(directInsert.error.message)) {
     return { employee: null, error: directInsert.error.message };
+  }
+
+  if (!isPrivileged) {
+    return {
+      employee: null,
+      error: "profiles_fk_requires_service_role_key"
+    };
   }
 
   const syntheticEmail = `employee-${Date.now()}-${crypto.randomUUID().slice(0, 8)}@local.shift`;
@@ -168,7 +181,7 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const { client, error: clientError } = buildClient();
+  const { client, error: clientError, isPrivileged } = buildClient();
   if (!client) {
     res.status(500).json({
       ok: false,
@@ -211,7 +224,7 @@ module.exports = async function handler(req, res) {
         return;
       }
 
-      const created = await insertEmployeeProfile(client, body);
+      const created = await insertEmployeeProfile(client, body, Boolean(isPrivileged));
       if (created.error || !created.employee) {
         res.status(400).json({
           ok: false,
