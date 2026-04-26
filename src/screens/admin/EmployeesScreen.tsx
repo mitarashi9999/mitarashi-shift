@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   FlatList,
   Modal,
   Platform,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -25,12 +26,23 @@ import { spacing } from "@/theme/spacing";
 const PROFILE_COLUMNS =
   "id, role, name, employee_code, phone, department, status";
 const REQUEST_TIMEOUT_MS = 10000;
+const EMPLOYEES_API_URL = (process.env.EXPO_PUBLIC_EMPLOYEES_API_URL || "/api/employees").trim();
+const APP_READ_TOKEN = (process.env.EXPO_PUBLIC_APP_READ_TOKEN || "").trim();
+const APP_WRITE_TOKEN = (process.env.EXPO_PUBLIC_APP_WRITE_TOKEN || "").trim();
 
 type EmployeeForm = {
   name: string;
   employeeCode: string;
   phone: string;
   department: string;
+};
+
+type EmployeesApiResult = {
+  ok: boolean;
+  employees?: Profile[];
+  employee?: Profile;
+  error?: string;
+  message?: string;
 };
 
 const EMPTY_FORM: EmployeeForm = {
@@ -76,6 +88,14 @@ function isProfilesTableMissing(message: string) {
   );
 }
 
+function isPermissionError(message: string) {
+  return (
+    message.includes("row-level security") ||
+    message.includes("permission denied") ||
+    message.includes("not allowed")
+  );
+}
+
 function formatAddEmployeeError(message: string) {
   if (isProfilesTableMissing(message)) {
     return "profilesテーブルが存在しません。Supabaseでテーブル作成後に再実行してください。";
@@ -83,13 +103,78 @@ function formatAddEmployeeError(message: string) {
   if (message.includes("duplicate key")) {
     return "社員コードが重複しています。別の社員コードで登録してください。";
   }
-  if (message.includes("row-level security")) {
-    return "RLSポリシーで拒否されました。profilesテーブルの権限設定を確認してください。";
+  if (isPermissionError(message)) {
+    return "権限設定で拒否されました。APIルート設定またはRLS設定を確認してください。";
   }
-  if (message.includes("permission denied")) {
-    return "profilesテーブルへの権限が不足しています。Supabaseの権限を確認してください。";
+  if (message.includes("foreign key")) {
+    return "profiles.id の外部キー制約で拒否されました。APIルートを使って再実行してください。";
   }
   return `従業員追加に失敗しました: ${message}`;
+}
+
+function sortEmployees(rows: Profile[]) {
+  return [...rows].sort((a, b) => a.name.localeCompare(b.name, "ja"));
+}
+
+function buildApiUrl(baseUrl: string, employeeId?: string) {
+  if (!baseUrl) {
+    return "";
+  }
+  const isAbsolute = /^https?:\/\//i.test(baseUrl);
+  const isRelativeWeb = Platform.OS === "web" && baseUrl.startsWith("/");
+  if (!isAbsolute && !isRelativeWeb) {
+    return "";
+  }
+
+  if (!employeeId) {
+    return baseUrl;
+  }
+  const joiner = baseUrl.includes("?") ? "&" : "?";
+  return `${baseUrl}${joiner}id=${encodeURIComponent(employeeId)}`;
+}
+
+async function requestEmployeesApi(
+  method: "GET" | "POST" | "DELETE",
+  payload?: Record<string, unknown>,
+  employeeId?: string
+) {
+  const endpoint = buildApiUrl(EMPLOYEES_API_URL, employeeId);
+  if (!endpoint) {
+    throw new Error("EMPLOYEES_API_URL_UNAVAILABLE");
+  }
+
+  const response = await withTimeout(
+    fetch(endpoint, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(APP_READ_TOKEN ? { "x-app-token": APP_READ_TOKEN } : {}),
+        ...(APP_WRITE_TOKEN ? { "x-app-write-token": APP_WRITE_TOKEN } : {})
+      },
+      ...(payload ? { body: JSON.stringify(payload) } : {})
+    }),
+    "EMPLOYEES_API_TIMEOUT"
+  );
+
+  const text = await response.text();
+  let json: EmployeesApiResult | null = null;
+  try {
+    json = text ? (JSON.parse(text) as EmployeesApiResult) : null;
+  } catch {
+    json = null;
+  }
+
+  if (!response.ok) {
+    const bodyMessage =
+      json?.message || json?.error || text || `${response.status} ${response.statusText}`;
+    throw new Error(bodyMessage);
+  }
+
+  if (!json || !json.ok) {
+    throw new Error(json?.message || json?.error || "EMPLOYEES_API_FAILED");
+  }
+
+  return json;
 }
 
 export function EmployeesScreen() {
@@ -103,75 +188,78 @@ export function EmployeesScreen() {
   const [formError, setFormError] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
 
-  const loadEmployees = useCallback(async (refresh = false) => {
-    if (!supabase) {
-      setEmployees([]);
-      setError("Supabase未設定です。.env / Vercel Environment Variables を確認してください。");
-      setIsTimedOut(false);
-      setIsLoading(false);
-      setIsRefreshing(false);
-      return;
-    }
+  const hasEmployeesApi = useMemo(() => Boolean(buildApiUrl(EMPLOYEES_API_URL)), []);
 
+  const loadEmployeesFromSupabase = useCallback(async () => {
+    if (!supabase) {
+      throw new Error("SUPABASE_NOT_CONFIGURED");
+    }
+    const requestPromise = supabase
+      .from("profiles")
+      .select(PROFILE_COLUMNS)
+      .eq("role", "employee")
+      .order("name", { ascending: true })
+      .then((result) => ({
+        data: (result.data ?? null) as Profile[] | null,
+        error: result.error ? { message: result.error.message } : null
+      }));
+    const { data, error: fetchError } = await withTimeout(
+      requestPromise,
+      "REQUEST_TIMEOUT"
+    );
+    if (fetchError) {
+      throw new Error(fetchError.message);
+    }
+    return sortEmployees(data ?? []);
+  }, []);
+
+  const loadEmployees = useCallback(async (refresh = false) => {
     try {
       if (refresh) {
         setIsRefreshing(true);
       } else {
         setIsLoading(true);
       }
-
-      const requestPromise = supabase
-        .from("profiles")
-        .select(PROFILE_COLUMNS)
-        .eq("role", "employee")
-        .order("name", { ascending: true })
-        .then((result) => ({
-          data: (result.data ?? null) as Profile[] | null,
-          error: result.error ? { message: result.error.message } : null
-        }));
-
-      const { data, error: fetchError } = await withTimeout(
-        requestPromise,
-        "REQUEST_TIMEOUT"
-      );
-
-      if (fetchError) {
-        if (isProfilesTableMissing(fetchError.message)) {
-          setEmployees([]);
-          setError("profilesテーブルが見つかりません。SupabaseのSQLで作成してください。");
-          setIsTimedOut(false);
-          return;
-        }
-        setEmployees([]);
-        setError(`従業員の取得に失敗しました: ${fetchError.message}`);
-        setIsTimedOut(false);
-        return;
-      }
-
-      setEmployees(data ?? []);
       setError(null);
       setIsTimedOut(false);
+
+      if (hasEmployeesApi) {
+        try {
+          const apiResult = await requestEmployeesApi("GET");
+          setEmployees(sortEmployees(apiResult.employees ?? []));
+          return;
+        } catch {
+          // API未設定時や一時エラー時はSupabase直接取得へフォールバック
+        }
+      }
+
+      const rows = await loadEmployeesFromSupabase();
+      setEmployees(rows);
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "Unknown employees fetch error";
-      if (message.includes("REQUEST_TIMEOUT")) {
+      if (message.includes("REQUEST_TIMEOUT") || message.includes("EMPLOYEES_API_TIMEOUT")) {
         setEmployees([]);
         setError(null);
         setIsTimedOut(true);
       } else if (isProfilesTableMissing(message)) {
         setEmployees([]);
-        setError("profilesテーブルが見つかりません。SupabaseのSQLで作成してください。");
-        setIsTimedOut(false);
+        setError("profilesテーブルが見つかりません。Supabase SQLを先に実行してください。");
+      } else if (message.includes("SUPABASE_NOT_CONFIGURED")) {
+        setEmployees([]);
+        setError("Supabase未設定です。.env / Vercel Environment Variables を確認してください。");
+      } else if (isPermissionError(message)) {
+        setEmployees([]);
+        setError("権限で従業員取得に失敗しました。RLS設定または /api/employees の設定を確認してください。");
       } else {
         setEmployees([]);
         setError(`従業員の取得に失敗しました: ${message}`);
-        setIsTimedOut(false);
       }
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [hasEmployeesApi, loadEmployeesFromSupabase]);
 
   useEffect(() => {
     void loadEmployees();
@@ -203,15 +291,40 @@ export function EmployeesScreen() {
       setFormError("氏名は必須です。");
       return;
     }
-    if (!supabase) {
-      setFormError("Supabase未設定のため追加できません。");
-      return;
-    }
 
     setIsAdding(true);
     setFormError(null);
 
     try {
+      if (hasEmployeesApi) {
+        try {
+          const apiResult = await requestEmployeesApi("POST", {
+            name,
+            employeeCode: form.employeeCode.trim() || null,
+            phone: form.phone.trim() || null,
+            department: form.department.trim() || null
+          });
+          const created = apiResult.employee;
+          if (!created) {
+            throw new Error("APIから追加結果が返ってきませんでした。");
+          }
+          setEmployees((current) =>
+            sortEmployees([...current.filter((item) => item.id !== created.id), created])
+          );
+          setError(null);
+          setIsTimedOut(false);
+          setAddModalVisible(false);
+          setForm(EMPTY_FORM);
+          return;
+        } catch {
+          // API失敗時はSupabase直接追加へフォールバック
+        }
+      }
+
+      if (!supabase) {
+        throw new Error("SUPABASE_NOT_CONFIGURED");
+      }
+
       const requestPromise = supabase
         .from("profiles")
         .upsert(
@@ -239,58 +352,65 @@ export function EmployeesScreen() {
       );
 
       if (addError) {
-        setFormError(formatAddEmployeeError(addError.message));
-        return;
+        throw new Error(addError.message);
       }
-
       if (!data) {
-        setFormError("従業員追加に失敗しました。");
-        return;
+        throw new Error("従業員追加に失敗しました。");
       }
 
-      const nextEmployees = [
-        ...employees.filter((item) => item.id !== data.id),
-        data
-      ].sort((a, b) => a.name.localeCompare(b.name, "ja"));
-      setEmployees(nextEmployees);
+      setEmployees((current) =>
+        sortEmployees([...current.filter((item) => item.id !== data.id), data])
+      );
       setError(null);
       setIsTimedOut(false);
       setAddModalVisible(false);
       setForm(EMPTY_FORM);
     } catch (cause) {
-      const message =
-        cause instanceof Error ? cause.message : "Unknown add employee error";
-      if (message.includes("PROFILE_UPSERT_TIMEOUT")) {
+      const message = cause instanceof Error ? cause.message : "Unknown add employee error";
+      if (message.includes("PROFILE_UPSERT_TIMEOUT") || message.includes("EMPLOYEES_API_TIMEOUT")) {
         setFormError("従業員追加がタイムアウトしました。通信状態を確認してください。");
+      } else if (message.includes("SUPABASE_NOT_CONFIGURED")) {
+        setFormError("Supabase未設定のため追加できません。");
       } else {
         setFormError(formatAddEmployeeError(message));
       }
     } finally {
       setIsAdding(false);
     }
-  }, [employees, form]);
+  }, [form, hasEmployeesApi]);
 
   const deleteEmployee = useCallback(
     async (employee: Profile) => {
-      if (!supabase) {
-        setError("Supabase未設定のため削除できません。");
-        return;
+      try {
+        if (hasEmployeesApi) {
+          try {
+            await requestEmployeesApi("DELETE", undefined, employee.id);
+            setEmployees((current) => current.filter((item) => item.id !== employee.id));
+            setError(null);
+            return;
+          } catch {
+            // API失敗時はSupabase直接削除へフォールバック
+          }
+        }
+
+        if (!supabase) {
+          throw new Error("SUPABASE_NOT_CONFIGURED");
+        }
+        const { error: deleteError } = await supabase
+          .from("profiles")
+          .delete()
+          .eq("id", employee.id);
+        if (deleteError) {
+          throw new Error(deleteError.message);
+        }
+        setEmployees((current) => current.filter((item) => item.id !== employee.id));
+        setError(null);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "Unknown delete error";
+        setError(`削除に失敗しました: ${message}`);
       }
-
-      const { error: deleteError } = await supabase
-        .from("profiles")
-        .delete()
-        .eq("id", employee.id);
-
-      if (deleteError) {
-        setError(`削除に失敗しました: ${deleteError.message}`);
-        return;
-      }
-
-      setEmployees((current) => current.filter((item) => item.id !== employee.id));
-      setError(null);
     },
-    []
+    [hasEmployeesApi]
   );
 
   const handleEmployeePress = useCallback(
@@ -328,10 +448,7 @@ export function EmployeesScreen() {
 
   return (
     <View style={styles.container}>
-      <Header
-        title="従業員"
-        subtitle="カードをタップすると詳細と削除操作を開けます"
-      />
+      <Header title="従業員" subtitle="カードをタップすると詳細と削除操作を開けます" />
       <PrimaryButton label="従業員を追加" onPress={handleAddPress} />
       {error ? <ErrorBanner message={error} /> : null}
       <FlatList
